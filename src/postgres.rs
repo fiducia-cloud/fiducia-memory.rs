@@ -4,19 +4,32 @@
 //! Embeddings are passed as pgvector literals (`[a,b,c]`) cast to `vector` in
 //! SQL, so the crate needs no pgvector Rust binding to compile.
 //!
-//! Tenant isolation is currently enforced **in code**: every query filters on
-//! `tenant_id` (and, for the claims ledger, the full `(tenant, namespace,
-//! subject, predicate)` key). A `set_tenant` helper exists and the schema
-//! defines row-level-security policies, but the per-request
-//! `fiducia.tenant_id` RLS GUC is **not currently wired** into the request
-//! path (`set_tenant` is not invoked per request, and with a connection pool a
-//! session-level `set_config` would not reliably bind to each query's
-//! connection). Wiring per-request RLS is tracked as a separate design task;
-//! until then the code-level filters are the isolation boundary.
+//! Tenant isolation is enforced in **two** layers (defense in depth):
+//!
+//! 1. **Row-level security (the backstop).** Every tenant-scoped query runs
+//!    inside a transaction opened by [`PostgresMemory::with_tenant`], which
+//!    first binds the per-request `fiducia.tenant_id` GUC with
+//!    `set_config('fiducia.tenant_id', $tenant, true)` — the bindable form of
+//!    `SET LOCAL`, so the setting is scoped to *that* transaction and released
+//!    on commit/rollback. Because the GUC is set on the *same* pooled
+//!    connection that then runs the query, the RLS policies (`migrations/0002`
+//!    + `migrations/0003`, which additionally `FORCE` RLS so it applies even to
+//!    the table owner) filter every row. A pooled connection therefore never
+//!    leaks tenant state between requests.
+//! 2. **Code-level `tenant_id = $n` filters (belt-and-suspenders).** Every
+//!    query *also* filters on `tenant_id` explicitly (and, for the claims
+//!    ledger, the full `(tenant, namespace, subject, predicate)` key), so a
+//!    query is correct even if RLS were somehow disabled.
 
 use crate::domain::{Claim, Memory, MemoryId, TenantId};
-use sqlx::{postgres::PgPoolOptions, PgPool, Row};
+use sqlx::{postgres::PgPoolOptions, PgPool, Postgres, Row, Transaction};
+use std::future::Future;
+use std::pin::Pin;
 use uuid::Uuid;
+
+/// A boxed, `Send` future borrowing a tenant-scoped transaction for `'c`.
+/// Returned by the closure passed to [`PostgresMemory::with_tenant`].
+type TxFuture<'c, T> = Pin<Box<dyn Future<Output = Result<T, sqlx::Error>> + Send + 'c>>;
 
 #[derive(Clone)]
 pub struct PostgresMemory {
