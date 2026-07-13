@@ -235,9 +235,11 @@ when running outside a trusted local session.
 - **All SQL is parameterized.** Every query uses `sqlx` bind parameters
   (`query`/`query_as` with `.bind(...)`); no SQL is built by string
   concatenation or `format!`. Embeddings are passed as bound `vector` parameters.
-- **Tenant isolation is enforced in code on every query**, backed by row-level
-  security policies on `memories` / `claims` / `memory_edges` keyed on the
-  per-request `fiducia.tenant_id` GUC.
+- **Tenant isolation is enforced in code on every query** (the claims ledger
+  additionally scopes reads on the full `(tenant, namespace, subject, predicate)`
+  key). Row-level security policies exist in the schema, but the per-request
+  `fiducia.tenant_id` GUC is **not currently wired** into the request path, so
+  code-level filters — not RLS — are today's isolation boundary.
 - **Request hardening:** a 2 MiB request-body limit, a 10 s per-request timeout,
   and a 5 s pool-acquire timeout are applied at the service layer; recall
   embeddings and page sizes are range-validated before they reach the database.
