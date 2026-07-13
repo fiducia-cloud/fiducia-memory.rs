@@ -130,17 +130,45 @@ create table if not exists memory_recall_log (
 );
 create index if not exists memory_recall_log_tenant_time_idx on memory_recall_log (tenant_id, created_at desc);
 
--- Tenant isolation: row-level security keyed on a per-request GUC. The service
--- layer ALSO enforces tenancy, but RLS is the backstop.
+-- Tenant isolation: row-level security keyed on a per-request GUC
+-- (`fiducia.tenant_id`), set per request/transaction with `SET LOCAL` (via
+-- `set_config(..., true)`) by the service. The service layer ALSO enforces
+-- tenancy in code, but RLS is the enforced backstop. RLS is FORCEd on every
+-- table so the policy applies even when the app connects as the table owner
+-- (see migrations/0003_rls_force.sql, the upgrade path for existing envs).
 alter table memories enable row level security;
 alter table claims enable row level security;
 alter table memory_edges enable row level security;
+alter table memory_embeddings enable row level security;
+alter table memory_recall_log enable row level security;
 drop policy if exists memories_tenant_isolation on memories;
 create policy memories_tenant_isolation on memories
-  using (tenant_id = nullif(current_setting('fiducia.tenant_id', true), '')::uuid);
+  using (tenant_id = nullif(current_setting('fiducia.tenant_id', true), '')::uuid)
+  with check (tenant_id = nullif(current_setting('fiducia.tenant_id', true), '')::uuid);
 drop policy if exists claims_tenant_isolation on claims;
 create policy claims_tenant_isolation on claims
-  using (tenant_id = nullif(current_setting('fiducia.tenant_id', true), '')::uuid);
+  using (tenant_id = nullif(current_setting('fiducia.tenant_id', true), '')::uuid)
+  with check (tenant_id = nullif(current_setting('fiducia.tenant_id', true), '')::uuid);
 drop policy if exists memory_edges_tenant_isolation on memory_edges;
 create policy memory_edges_tenant_isolation on memory_edges
-  using (tenant_id = nullif(current_setting('fiducia.tenant_id', true), '')::uuid);
+  using (tenant_id = nullif(current_setting('fiducia.tenant_id', true), '')::uuid)
+  with check (tenant_id = nullif(current_setting('fiducia.tenant_id', true), '')::uuid);
+-- memory_embeddings has no tenant_id of its own; scope it via its parent memory.
+drop policy if exists memory_embeddings_tenant_isolation on memory_embeddings;
+create policy memory_embeddings_tenant_isolation on memory_embeddings
+  using (exists (select 1 from memories m
+                 where m.id = memory_embeddings.memory_id
+                   and m.tenant_id = nullif(current_setting('fiducia.tenant_id', true), '')::uuid))
+  with check (exists (select 1 from memories m
+                      where m.id = memory_embeddings.memory_id
+                        and m.tenant_id = nullif(current_setting('fiducia.tenant_id', true), '')::uuid));
+drop policy if exists memory_recall_log_tenant_isolation on memory_recall_log;
+create policy memory_recall_log_tenant_isolation on memory_recall_log
+  using (tenant_id = nullif(current_setting('fiducia.tenant_id', true), '')::uuid)
+  with check (tenant_id = nullif(current_setting('fiducia.tenant_id', true), '')::uuid);
+-- FORCE so the policy applies even to the table owner (the service's pool role).
+alter table memories force row level security;
+alter table claims force row level security;
+alter table memory_edges force row level security;
+alter table memory_embeddings force row level security;
+alter table memory_recall_log force row level security;
