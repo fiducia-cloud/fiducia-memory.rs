@@ -195,6 +195,50 @@ curl -s localhost:8100/v1/claims/resolve -H 'content-type: application/json' -d 
 # now consensus → {"authoritative_value": true, ...}
 ```
 
+## Environment & configuration
+
+The service is configured entirely through environment variables:
+
+| Variable | Required | Secret | Description |
+|---|---|---|---|
+| `DATABASE_URL` | **yes** | **yes** | Postgres connection URL (`postgres://user:pass@host/db`). **Carries database credentials** — treat as a secret: never log it, keep it out of shell history and CI logs, inject it from a secret store. Points at the customer's own Postgres or the Fiducia-hosted default; needs the `pgvector` extension. |
+| `FIDUCIA_MEMORY_BIND` | no | no | Listen address for the HTTP service. Defaults to `127.0.0.1:8100`. |
+| `RUST_LOG` / `fiducia_memory=…` | no | no | Standard `tracing-subscriber` env-filter for log levels (defaults to `fiducia_memory=info,tower_http=info`). |
+
+### CLI flags → env (flags-2-env)
+
+Rather than exporting the vars by hand, the pinned
+[`ORESoftware/flags-2-env`](https://github.com/ORESoftware/flags-2-env) parser
+(vendored at `vendor/flags-2-env`) maps CLI flags to these env vars from the
+`.cli-flags.toml` schema. The schema is audited in CI (`.github/workflows/cli-flags.yml`).
+
+```bash
+git submodule update --init --recursive
+make -C vendor/flags-2-env all
+scripts/with-flags2env.sh --db=postgres://user:pass@host/db --bind=0.0.0.0:8100 -- cargo run
+```
+
+`scripts/with-flags2env.sh` runs the parser against `.cli-flags.toml`, exports the
+resulting env map, then execs the command. Because `DATABASE_URL` is secret,
+prefer supplying it directly from your secret store rather than as a shell flag
+when running outside a trusted local session.
+
+## Security & hardening
+
+- **`cargo audit` is clean** — no known advisories affect the dependency tree
+  (218 crates scanned). No advisories are currently accepted/waived.
+- **All SQL is parameterized.** Every query uses `sqlx` bind parameters
+  (`query`/`query_as` with `.bind(...)`); no SQL is built by string
+  concatenation or `format!`. Embeddings are passed as bound `vector` parameters.
+- **Tenant isolation is enforced in code on every query**, backed by row-level
+  security policies on `memories` / `claims` / `memory_edges` keyed on the
+  per-request `fiducia.tenant_id` GUC.
+- **Request hardening:** a 2 MiB request-body limit, a 10 s per-request timeout,
+  and a 5 s pool-acquire timeout are applied at the service layer; recall
+  embeddings and page sizes are range-validated before they reach the database.
+- **Secrets stay out of logs:** `DATABASE_URL` is never logged; only the
+  (non-secret) bind address is emitted at startup.
+
 ## Scope & roadmap
 
 This is a focused, honest first cut. What is **real and tested** today: the
