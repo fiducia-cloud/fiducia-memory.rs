@@ -10,17 +10,28 @@ description = "The Fiducia shared brain: durable agent memory, a contestable cla
 license = "MIT"
 
 [dependencies]
+# Epistemic layer (mine): async MemoryStore trait.
 async-trait = "0.1"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
+# Durable storage floor (codex): pgvector bindings + content_sha256 dedup.
+pgvector = { version = "0.4", features = ["sqlx"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "json", "chrono"] }
+# `full` (codex) is a superset of the previously-used tokio feature set.
+tokio = { version = "1", features = ["full"] }
+# sqlx 0.9 with `migrate`/`macros`/`derive` (codex durable store uses
+# `sqlx::migrate!`, `query_as`, and `FromRow` derive) plus the epistemic layer's
+# runtime queries. TLS via rustls so a customer's managed Postgres works.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "uuid", "json", "chrono", "migrate", "macros", "derive"] }
+# Durable service middleware (codex): body limit, timeout, tracing.
+tower-http = { version = "0.6", features = ["trace", "request-id", "timeout", "limit"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }
