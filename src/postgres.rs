@@ -34,6 +34,17 @@ impl PostgresMemory {
         })
     }
 
+    /// Wrap an already-established pool so the epistemic layer and the durable
+    /// store ([`crate::durable::store::MemoryStore`]) can share ONE `PgPool`.
+    pub fn from_pool(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    /// The underlying connection pool (shared with the durable store).
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     pub async fn ready(&self) -> Result<(), sqlx::Error> {
         sqlx::query("select 1").execute(&self.pool).await?;
         Ok(())
