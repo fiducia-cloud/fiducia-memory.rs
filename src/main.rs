@@ -24,7 +24,7 @@
 use std::{collections::BTreeMap, sync::Arc, sync::Mutex, time::Duration};
 
 use axum::{
-    extract::{FromRef, Path, Query, State},
+    extract::{FromRef, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
