@@ -122,8 +122,13 @@ mod tests {
     #[test]
     fn durable_hits_project_into_fusable_candidates() {
         let tenant = Uuid::new_v4();
-        let candidates =
-            candidates_from_hits(vec![hit(tenant, "refund via original method", 0.9, 0.4, 0.8)]);
+        let candidates = candidates_from_hits(vec![hit(
+            tenant,
+            "refund via original method",
+            0.9,
+            0.4,
+            0.8,
+        )]);
         assert_eq!(candidates.len(), 1);
         let c = &candidates[0];
         assert_eq!(c.memory.tenant_id, tenant);
@@ -138,7 +143,13 @@ mod tests {
         use crate::recall::{recall, RecallQuery};
         let tenant = Uuid::new_v4();
         let hits = vec![
-            hit(tenant, "resolved: refund via original method", 0.95, 0.9, 0.9),
+            hit(
+                tenant,
+                "resolved: refund via original method",
+                0.95,
+                0.9,
+                0.9,
+            ),
             hit(tenant, "weak guess about refunds", 0.3, 0.2, 0.2),
         ];
         let candidates = candidates_from_hits(hits);
@@ -166,7 +177,8 @@ mod tests {
         use crate::recall::{recall, RecallQuery};
         let mine = Uuid::new_v4();
         let theirs = Uuid::new_v4();
-        let candidates = candidates_from_hits(vec![hit(theirs, "another tenant fact", 0.99, 1.0, 1.0)]);
+        let candidates =
+            candidates_from_hits(vec![hit(theirs, "another tenant fact", 0.99, 1.0, 1.0)]);
         let query = RecallQuery {
             tenant_id: mine,
             query: "x".into(),

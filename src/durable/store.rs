@@ -44,10 +44,17 @@ impl MemoryStore {
     }
 
     pub async fn ping(&self) -> Result<(), sqlx::Error> {
-        sqlx::query("SELECT 1").execute(&self.pool).await.map(|_| ())
+        sqlx::query("SELECT 1")
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
     }
 
-    pub async fn append(&self, input: &AppendClaim, embedding: Vector) -> Result<Claim, StoreError> {
+    pub async fn append(
+        &self,
+        input: &AppendClaim,
+        embedding: Vector,
+    ) -> Result<Claim, StoreError> {
         let mut tx = self.pool.begin().await?;
         let claim = insert_claim(&mut tx, input, embedding).await?;
         tx.commit().await?;
@@ -80,15 +87,17 @@ impl MemoryStore {
         embedding: Vector,
     ) -> Result<Vec<RecallHit>, StoreError> {
         let lexical_weight = 1.0 - request.semantic_weight;
-        Ok(sqlx::query_as::<_, RecallHit>(include_str!("../../sql/recall.sql"))
-            .bind(request.tenant_id)
-            .bind(&request.query)
-            .bind(embedding)
-            .bind(request.semantic_weight)
-            .bind(lexical_weight)
-            .bind(request.limit)
-            .fetch_all(&self.pool)
-            .await?)
+        Ok(
+            sqlx::query_as::<_, RecallHit>(include_str!("../../sql/recall.sql"))
+                .bind(request.tenant_id)
+                .bind(&request.query)
+                .bind(embedding)
+                .bind(request.semantic_weight)
+                .bind(lexical_weight)
+                .bind(request.limit)
+                .fetch_all(&self.pool)
+                .await?,
+        )
     }
 }
 

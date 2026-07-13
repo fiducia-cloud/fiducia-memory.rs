@@ -1,0 +1,23 @@
+# flags-2-env flag schema for the fiducia-memory CLI: maps command-line flags to
+# the env vars the binary reads. Consumed by scripts/with-flags2env.sh and
+# audited in CI (cli-flags.yml).
+[help]
+url = "https://github.com/fiducia-cloud/fiducia-memory.rs"
+columns = ["options", "env", "type", "description"]
+
+[parse]
+allow_unknown = false
+
+# SECRET: carries Postgres credentials (postgres://user:pass@host/db). Never log
+# this value; keep it out of shell history and CI logs.
+[flags.database-url]
+env = "DATABASE_URL"
+aliases = ["database-url", "db"]
+type = "string"
+help = "Postgres connection URL (customer's own DB or the Fiducia default). SECRET: contains DB credentials."
+
+[flags.bind]
+env = "FIDUCIA_MEMORY_BIND"
+aliases = ["bind"]
+type = "string"
+help = "Listen address for the HTTP service (default 127.0.0.1:8100)."

@@ -75,7 +75,10 @@ pub async fn supersede_claim(
     }
 }
 
-pub async fn recall(State(store): State<MemoryStore>, Json(input): Json<RecallRequest>) -> Response {
+pub async fn recall(
+    State(store): State<MemoryStore>,
+    Json(input): Json<RecallRequest>,
+) -> Response {
     let embedding = match input.validate() {
         Ok(value) => value,
         Err(error) => return bad_request(error),
