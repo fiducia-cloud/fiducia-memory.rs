@@ -118,10 +118,7 @@ impl MemoryStore {
 /// Bind the per-request `fiducia.tenant_id` GUC on `tx` with `SET LOCAL`
 /// semantics (`set_config(..., true)`), so the FORCEd RLS policies on
 /// `memory_claims` filter this transaction's statements to `tenant`.
-async fn bind_tenant(
-    tx: &mut Transaction<'_, Postgres>,
-    tenant: Uuid,
-) -> Result<(), sqlx::Error> {
+async fn bind_tenant(tx: &mut Transaction<'_, Postgres>, tenant: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query("select set_config('fiducia.tenant_id', $1, true)")
         .bind(tenant.to_string())
         .execute(&mut **tx)

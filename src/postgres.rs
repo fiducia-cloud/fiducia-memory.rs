@@ -24,12 +24,13 @@
 use crate::domain::{Claim, Memory, MemoryId, TenantId};
 use sqlx::{postgres::PgPoolOptions, PgPool, Postgres, Row, Transaction};
 use std::future::Future;
-use std::pin::Pin;
 use uuid::Uuid;
 
-/// A boxed, `Send` future borrowing a tenant-scoped transaction for `'c`.
-/// Returned by the closure passed to [`PostgresMemory::with_tenant`].
-type TxFuture<'c, T> = Pin<Box<dyn Future<Output = Result<T, sqlx::Error>> + Send + 'c>>;
+/// A tenant-scoped transaction handed to (and returned by) the closure passed to
+/// [`PostgresMemory::with_tenant`]. It is `'static` because it is borrowed from
+/// the pool (it owns its pooled connection), which lets the closure own it —
+/// running its statements on it — without entangling caller lifetimes.
+type TenantTx = Transaction<'static, Postgres>;
 
 #[derive(Clone)]
 pub struct PostgresMemory {
