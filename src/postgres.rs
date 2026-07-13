@@ -180,16 +180,22 @@ impl PostgresMemory {
         Ok(())
     }
 
+    /// Fetch the accepted claim value, scoped to the ledger's full uniqueness
+    /// key `(tenant, namespace, subject, predicate)`. `namespace` must be
+    /// included: a tenant can hold the same `(subject, predicate)` in multiple
+    /// namespaces, so omitting it could return a value from the wrong namespace.
     pub async fn accepted_claim_value(
         &self,
         tenant: TenantId,
+        namespace: &str,
         subject: &str,
         predicate: &str,
     ) -> Result<Option<serde_json::Value>, sqlx::Error> {
         let row = sqlx::query(
-            "select value from claims where tenant_id=$1 and subject=$2 and predicate=$3 and status='accepted'",
+            "select value from claims where tenant_id=$1 and namespace=$2 and subject=$3 and predicate=$4 and status='accepted'",
         )
         .bind(tenant)
+        .bind(namespace)
         .bind(subject)
         .bind(predicate)
         .fetch_optional(&self.pool)
