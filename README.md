@@ -242,6 +242,11 @@ cannot leak through shell history or process listings.
 
 ## Security & hardening
 
+CI uses Rust `1.95.0`, locked Cargo resolution, warnings-as-errors Clippy, the
+full test suite, and a required advisory scan. The container uses the same exact
+Rust release for its build and an explicit numeric non-root distroless runtime;
+Dependabot tracks Cargo, actions, and Docker inputs weekly.
+
 - **`cargo audit` is clean** — no known advisories affect the dependency tree
   (218 crates scanned). No advisories are currently accepted/waived.
 - **All SQL is parameterized.** Every query uses `sqlx` bind parameters
