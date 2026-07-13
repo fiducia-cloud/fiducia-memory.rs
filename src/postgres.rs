@@ -210,34 +210,40 @@ impl PostgresMemory {
     /// — value, confidence, status, evidence, supporters, contests — round-trips.
     pub async fn upsert_claim(&self, claim: &Claim) -> Result<(), sqlx::Error> {
         let author_uuid = Uuid::parse_str(&claim.author).ok();
-        sqlx::query(
-            "insert into claims (id, tenant_id, namespace, subject, predicate, value, confidence, author_agent_id, status, evidence, supporters, contests, resolved_by, superseded_by, valid_until, claim_version) \
-             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) \
-             on conflict (tenant_id, namespace, subject, predicate) do update set \
-               value=excluded.value, confidence=excluded.confidence, status=excluded.status, evidence=excluded.evidence, \
-               supporters=excluded.supporters, contests=excluded.contests, resolved_by=excluded.resolved_by, \
-               superseded_by=excluded.superseded_by, valid_until=excluded.valid_until, \
-               claim_version=excluded.claim_version, updated_at=now()",
-        )
-        .bind(claim.id)
-        .bind(claim.tenant_id)
-        .bind(&claim.namespace)
-        .bind(&claim.subject)
-        .bind(&claim.predicate)
-        .bind(&claim.value)
-        .bind(claim.confidence)
-        .bind(author_uuid)
-        .bind(format!("{:?}", claim.status).to_lowercase())
-        .bind(serde_json::to_value(&claim.evidence).expect("serializable"))
-        .bind(serde_json::to_value(&claim.supporters).expect("serializable"))
-        .bind(serde_json::to_value(&claim.contests).expect("serializable"))
-        .bind(&claim.resolved_by)
-        .bind(claim.superseded_by)
-        .bind(claim.valid_until)
-        .bind(claim.claim_version as i64)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        let status = format!("{:?}", claim.status).to_lowercase();
+        self.with_tenant(claim.tenant_id, |tx| {
+            Box::pin(async move {
+                sqlx::query(
+                    "insert into claims (id, tenant_id, namespace, subject, predicate, value, confidence, author_agent_id, status, evidence, supporters, contests, resolved_by, superseded_by, valid_until, claim_version) \
+                     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) \
+                     on conflict (tenant_id, namespace, subject, predicate) do update set \
+                       value=excluded.value, confidence=excluded.confidence, status=excluded.status, evidence=excluded.evidence, \
+                       supporters=excluded.supporters, contests=excluded.contests, resolved_by=excluded.resolved_by, \
+                       superseded_by=excluded.superseded_by, valid_until=excluded.valid_until, \
+                       claim_version=excluded.claim_version, updated_at=now()",
+                )
+                .bind(claim.id)
+                .bind(claim.tenant_id)
+                .bind(&claim.namespace)
+                .bind(&claim.subject)
+                .bind(&claim.predicate)
+                .bind(&claim.value)
+                .bind(claim.confidence)
+                .bind(author_uuid)
+                .bind(status)
+                .bind(serde_json::to_value(&claim.evidence).expect("serializable"))
+                .bind(serde_json::to_value(&claim.supporters).expect("serializable"))
+                .bind(serde_json::to_value(&claim.contests).expect("serializable"))
+                .bind(&claim.resolved_by)
+                .bind(claim.superseded_by)
+                .bind(claim.valid_until)
+                .bind(claim.claim_version as i64)
+                .execute(&mut **tx)
+                .await?;
+                Ok(())
+            })
+        })
+        .await
     }
 
     /// Fetch the accepted claim value, scoped to the ledger's full uniqueness
