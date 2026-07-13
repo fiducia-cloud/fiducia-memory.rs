@@ -130,23 +130,34 @@ impl PostgresMemory {
 
     /// Store (or replace) a memory's embedding for a given model. The embedding
     /// is written as a pgvector literal cast in SQL.
+    ///
+    /// `tenant` is required because `memory_embeddings` carries no `tenant_id`
+    /// of its own: its RLS policy (and INSERT `WITH CHECK`) is scoped through
+    /// the parent `memories` row, so the `fiducia.tenant_id` GUC MUST be set to
+    /// the owning tenant for the write to be admitted.
     pub async fn upsert_embedding(
         &self,
+        tenant: TenantId,
         memory_id: MemoryId,
         model: &str,
         embedding: &[f32],
     ) -> Result<(), sqlx::Error> {
         let literal = pgvector_literal(embedding);
-        sqlx::query(
-            "insert into memory_embeddings (memory_id, model, embedding) values ($1,$2,$3::vector) \
-             on conflict (memory_id, model) do update set embedding = excluded.embedding, created_at = now()",
-        )
-        .bind(memory_id)
-        .bind(model)
-        .bind(literal)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        self.with_tenant(tenant, |tx| {
+            Box::pin(async move {
+                sqlx::query(
+                    "insert into memory_embeddings (memory_id, model, embedding) values ($1,$2,$3::vector) \
+                     on conflict (memory_id, model) do update set embedding = excluded.embedding, created_at = now()",
+                )
+                .bind(memory_id)
+                .bind(model)
+                .bind(literal)
+                .execute(&mut **tx)
+                .await?;
+                Ok(())
+            })
+        })
+        .await
     }
 
     /// Nearest memories to `query_embedding` by cosine distance, scoped to the
