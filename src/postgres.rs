@@ -14,8 +14,8 @@
 //!    on commit/rollback. Because the GUC is set on the *same* pooled
 //!    connection that then runs the query, the RLS policies (`migrations/0002`
 //!    + `migrations/0003`, which additionally `FORCE` RLS so it applies even to
-//!    the table owner) filter every row. A pooled connection therefore never
-//!    leaks tenant state between requests.
+//!      the table owner) filter every row. A pooled connection therefore never
+//!      leaks tenant state between requests.
 //! 2. **Code-level `tenant_id = $n` filters (belt-and-suspenders).** Every
 //!    query *also* filters on `tenant_id` explicitly (and, for the claims
 //!    ledger, the full `(tenant, namespace, subject, predicate)` key), so a
@@ -111,7 +111,7 @@ impl PostgresMemory {
 
     pub async fn insert_memory(&self, memory: &Memory) -> Result<(), sqlx::Error> {
         let memory = memory.clone();
-        self.with_tenant(memory.tenant_id, move |tx| {
+        self.with_tenant(memory.tenant_id, move |mut tx| {
             Box::pin(async move {
                 sqlx::query(
                     "insert into memories (id, tenant_id, namespace, memory_type, content, metadata, provenance, trust_score, importance, valid_from, valid_until) \
@@ -128,9 +128,9 @@ impl PostgresMemory {
                 .bind(memory.importance)
                 .bind(memory.valid_from)
                 .bind(memory.valid_until)
-                .execute(&mut **tx)
+                .execute(&mut *tx)
                 .await?;
-                Ok(())
+                Ok((tx, ()))
             })
         })
         .await
@@ -152,7 +152,7 @@ impl PostgresMemory {
     ) -> Result<(), sqlx::Error> {
         let literal = pgvector_literal(embedding);
         let model = model.to_string();
-        self.with_tenant(tenant, move |tx| {
+        self.with_tenant(tenant, move |mut tx| {
             Box::pin(async move {
                 sqlx::query(
                     "insert into memory_embeddings (memory_id, model, embedding) values ($1,$2,$3::vector) \
@@ -161,9 +161,9 @@ impl PostgresMemory {
                 .bind(memory_id)
                 .bind(model)
                 .bind(literal)
-                .execute(&mut **tx)
+                .execute(&mut *tx)
                 .await?;
-                Ok(())
+                Ok((tx, ()))
             })
         })
         .await
@@ -182,7 +182,7 @@ impl PostgresMemory {
     ) -> Result<Vec<ScoredRow>, sqlx::Error> {
         let literal = pgvector_literal(query_embedding);
         let model = model.to_string();
-        self.with_tenant(tenant, move |tx| {
+        self.with_tenant(tenant, move |mut tx| {
             Box::pin(async move {
                 let rows = sqlx::query(
                     "select m.id, m.content, 1 - (e.embedding <=> $1::vector) as semantic \
@@ -195,16 +195,17 @@ impl PostgresMemory {
                 .bind(tenant)
                 .bind(model)
                 .bind(limit)
-                .fetch_all(&mut **tx)
+                .fetch_all(&mut *tx)
                 .await?;
-                Ok(rows
+                let rows = rows
                     .into_iter()
                     .map(|row| ScoredRow {
                         memory_id: row.get::<Uuid, _>("id"),
                         content: row.get::<String, _>("content"),
                         semantic_score: row.get::<f64, _>("semantic") as f32,
                     })
-                    .collect())
+                    .collect();
+                Ok((tx, rows))
             })
         })
         .await
@@ -222,7 +223,7 @@ impl PostgresMemory {
         let author_uuid = Uuid::parse_str(&claim.author).ok();
         let status = format!("{:?}", claim.status).to_lowercase();
         let claim = claim.clone();
-        self.with_tenant(claim.tenant_id, move |tx| {
+        self.with_tenant(claim.tenant_id, move |mut tx| {
             Box::pin(async move {
                 sqlx::query(
                     "insert into claims (id, tenant_id, namespace, subject, predicate, value, confidence, author_agent_id, status, evidence, supporters, contests, resolved_by, superseded_by, valid_until, claim_version) \
@@ -249,9 +250,9 @@ impl PostgresMemory {
                 .bind(claim.superseded_by)
                 .bind(claim.valid_until)
                 .bind(claim.claim_version as i64)
-                .execute(&mut **tx)
+                .execute(&mut *tx)
                 .await?;
-                Ok(())
+                Ok((tx, ()))
             })
         })
         .await
@@ -271,7 +272,7 @@ impl PostgresMemory {
         let namespace = namespace.to_string();
         let subject = subject.to_string();
         let predicate = predicate.to_string();
-        self.with_tenant(tenant, move |tx| {
+        self.with_tenant(tenant, move |mut tx| {
             Box::pin(async move {
                 let row = sqlx::query(
                     "select value from claims where tenant_id=$1 and namespace=$2 and subject=$3 and predicate=$4 and status='accepted'",
@@ -280,9 +281,10 @@ impl PostgresMemory {
                 .bind(namespace)
                 .bind(subject)
                 .bind(predicate)
-                .fetch_optional(&mut **tx)
+                .fetch_optional(&mut *tx)
                 .await?;
-                Ok(row.map(|row| row.get::<serde_json::Value, _>("value")))
+                let value = row.map(|row| row.get::<serde_json::Value, _>("value"));
+                Ok((tx, value))
             })
         })
         .await
