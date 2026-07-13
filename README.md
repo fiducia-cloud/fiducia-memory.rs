@@ -129,9 +129,14 @@ The only requirement is the **pgvector** extension (`create extension vector`) â
 the schema does this for you. Queries use runtime `sqlx` binding, so the crate
 builds with no database reachable at compile time.
 
-Tenant isolation is enforced three ways: every query is tenant-scoped in code,
-the service sets a per-request `fiducia.tenant_id` GUC, and **row-level security
-policies** on `memories` / `claims` / `memory_edges` are the backstop.
+Tenant isolation is currently enforced **in code**: every query is tenant-scoped
+(and claims-ledger reads use the full `(tenant, namespace, subject, predicate)`
+uniqueness key). The schema also defines **row-level security policies** on
+`memories` / `claims` / `memory_edges` keyed on a `fiducia.tenant_id` setting, but
+the per-request `fiducia.tenant_id` GUC is **not currently wired** into the
+request path (the `set_tenant` helper is not invoked per request). Wiring
+per-request RLS is a separate design task; until it lands, the code-level
+tenant filters are the isolation boundary â€” not the RLS GUC.
 
 ## Running it
 
