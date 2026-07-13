@@ -56,6 +56,11 @@ impl MemoryStore {
         embedding: Vector,
     ) -> Result<Claim, StoreError> {
         let mut tx = self.pool.begin().await?;
+        // Wire per-request RLS: bind `fiducia.tenant_id` on THIS transaction's
+        // connection so the (FORCEd) tenant policy on `memory_claims` admits and
+        // scopes every statement below. Without this the INSERT's RLS WITH CHECK
+        // would reject the row once RLS is forced.
+        bind_tenant(&mut tx, input.tenant_id).await?;
         let claim = insert_claim(&mut tx, input, embedding).await?;
         tx.commit().await?;
         Ok(claim)
