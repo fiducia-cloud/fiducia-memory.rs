@@ -26,8 +26,13 @@ pub fn trust_from(provenance: &Provenance, supporters: usize, contests: usize) -
     (base + support_boost - contest_penalty).clamp(0.0, 1.0)
 }
 
-/// Durable memory storage. Tenancy is enforced by every method taking a
-/// `tenant_id`; production additionally sets a per-request RLS GUC.
+/// Durable memory storage. Tenancy is enforced in code here: every method takes
+/// a `tenant_id` and every query filters on it. The Postgres persistence path
+/// ([`crate::postgres::PostgresMemory`]) adds a second layer — it binds the
+/// per-request `fiducia.tenant_id` GUC per transaction so FORCEd row-level
+/// security also scopes every row (see that module's docs). This trait's
+/// in-memory implementation has no database and so relies on the code-level
+/// filter alone.
 #[async_trait]
 pub trait MemoryStore: Send + Sync {
     async fn insert(&self, memory: Memory) -> Result<(), MemoryError>;

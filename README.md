@@ -76,6 +76,7 @@ src/
 migrations/                     (applied on boot via sqlx::migrate!)
   0001_memory.sql               durable floor: memory_claims (tsvector, HNSW, sha256 dedup, supersession)
   0002_fiducia_memory.sql       epistemic schema: memories, embeddings, claims ledger, edges, recall log, RLS
+  0003_rls_force.sql            tenant policies for every durable table + FORCE RLS owner protection
 sql/
   fiducia_memory.sql   canonical epistemic schema (also embedded by db.rs for --migrate parity)
   recall.sql           durable hybrid-recall query (candidate generation)
@@ -129,9 +130,13 @@ The only requirement is the **pgvector** extension (`create extension vector`) �
 the schema does this for you. Queries use runtime `sqlx` binding, so the crate
 builds with no database reachable at compile time.
 
-Tenant isolation is enforced three ways: every query is tenant-scoped in code,
-the service sets a per-request `fiducia.tenant_id` GUC, and **row-level security
-policies** on `memories` / `claims` / `memory_edges` are the backstop.
+Tenant isolation is enforced twice. Every query carries an explicit tenant
+predicate, and every tenant-scoped database operation runs in a transaction that
+binds `fiducia.tenant_id` with `SET LOCAL` semantics on that same pooled
+connection. The schema enables and **forces** row-level security on the durable
+fact ledger, memories, embeddings, contestable claims, graph edges, and recall
+audit log. A missing tenant binding therefore sees or writes no tenant rows,
+including when the service connects as the table owner.
 
 ## Running it
 
@@ -207,13 +212,59 @@ curl -s localhost:8100/v1/claims/resolve -H 'content-type: application/json' -d 
 # now consensus → {"authoritative_value": true, ...}
 ```
 
+## Environment & configuration
+
+The service is configured entirely through environment variables:
+
+| Variable | Required | Secret | Description |
+|---|---|---|---|
+| `DATABASE_URL` | **yes** | **yes** | Postgres connection URL (`postgres://user:pass@host/db`). **Carries database credentials** — treat as a secret: never log it, keep it out of shell history and CI logs, inject it from a secret store. Points at the customer's own Postgres or the Fiducia-hosted default; needs the `pgvector` extension. |
+| `FIDUCIA_MEMORY_BIND` | no | no | Listen address for the HTTP service. Defaults to `127.0.0.1:8100`. |
+| `RUST_LOG` / `fiducia_memory=…` | no | no | Standard `tracing-subscriber` env-filter for log levels (defaults to `fiducia_memory=info,tower_http=info`). |
+
+### CLI flags → env (flags-2-env)
+
+For non-secret settings, the pinned
+[`ORESoftware/flags-2-env`](https://github.com/ORESoftware/flags-2-env) parser
+(vendored at `vendor/flags-2-env`) maps CLI flags to these env vars from the
+`.cli-flags.toml` schema. The schema is audited in CI (`.github/workflows/cli-flags.yml`).
+
+```bash
+git submodule update --init --recursive
+make -B -C vendor/flags-2-env all
+DATABASE_URL="$DATABASE_URL" scripts/with-flags2env.sh --bind=0.0.0.0:8100 -- cargo run
+```
+
+`scripts/with-flags2env.sh` runs the parser against `.cli-flags.toml`, exports the
+resulting env map, then execs the command. `DATABASE_URL` is deliberately excluded
+from the CLI schema; inject it through the environment or a secret store so it
+cannot leak through shell history or process listings.
+
+## Security & hardening
+
+- **`cargo audit` is clean** — no known advisories affect the dependency tree
+  (218 crates scanned). No advisories are currently accepted/waived.
+- **All SQL is parameterized.** Every query uses `sqlx` bind parameters
+  (`query`/`query_as` with `.bind(...)`); no SQL is built by string
+  concatenation or `format!`. Embeddings are passed as bound `vector` parameters.
+- **Tenant isolation is defense in depth.** Queries retain explicit tenant
+  predicates (the claims ledger also uses its full namespace key), while a
+  transaction-local `fiducia.tenant_id` binding activates FORCEd RLS on every
+  durable tenant table. Pool connections cannot retain tenant state across
+  requests.
+- **Request hardening:** a 2 MiB request-body limit, a 10 s per-request timeout,
+  and a 5 s pool-acquire timeout are applied at the service layer; recall
+  embeddings and page sizes are range-validated before they reach the database.
+- **Secrets stay out of logs:** `DATABASE_URL` is never logged; only the
+  (non-secret) bind address is emitted at startup.
+
 ## Scope & roadmap
 
 This is a focused, honest first cut. What is **real and tested** today: the
 claim-ledger lifecycle and its invariants, the full recall fusion/rerank/token
 pipeline with hard authorization filters, provenance-based trust scoring, the
-Postgres/pgvector persistence layer (real SQL, runtime-bound), the schema with
-RLS, and the HTTP service.
+  Postgres/pgvector persistence layer (real SQL, runtime-bound), transaction-
+  scoped FORCEd RLS, and the HTTP service.
 
 Deliberately **not yet** wired, and where each goes:
 
