@@ -162,3 +162,23 @@ Deliberately **not yet** wired, and where each goes:
 
 These are marked as follow-ups rather than hidden — nothing above is stubbed or
 faked; the boundaries are simply drawn where an external dependency begins.
+
+## Compatibility API preserved from `fiducia-memory`
+
+The original non-suffixed repository is merged into this history. Its
+tenant-scoped immutable claims API remains available as the
+`fiducia-memory-compat` binary, backed by its SQLx migration and pgvector/HNSW
+schema:
+
+```text
+POST /v1/claims
+POST /v1/claims/{claim_id}/supersede
+POST /v1/recall
+GET  /healthz
+GET  /readyz
+```
+
+Run it with `cargo run --bin fiducia-memory-compat`. It binds to
+`127.0.0.1:8090` by default; `FIDUCIA_MEMORY_COMPAT_BIND` overrides the address.
+The caller supplies 1536-dimensional embeddings, and production ingress must
+authenticate each request and bind its `tenant_id` to the caller credential.

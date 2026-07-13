@@ -15,12 +15,15 @@
 //! similarity can rank candidates but never include an unauthorized or invalid
 //! one.
 
+pub mod api;
 pub mod claims;
 pub mod db;
 pub mod domain;
 pub mod memory;
+pub mod model;
 pub mod postgres;
 pub mod recall;
+pub mod store;
 
 pub use claims::{Assertion, ClaimError, ClaimLedger};
 pub use domain::*;
@@ -30,3 +33,25 @@ pub use recall::{
     estimate_tokens, recall, recall_with_weights, Candidate, ContextPack, RecallQuery,
     RecallWeights, RetrievedMemory,
 };
+
+use axum::{
+    routing::{get, post},
+    Router,
+};
+
+/// Compatibility router for the original append/supersede/recall service API.
+///
+/// The canonical binary exposes the richer contestable-memory API. Keeping this
+/// router public preserves existing clients while they migrate deliberately.
+pub fn router(store: store::MemoryStore) -> Router {
+    Router::new()
+        .route("/healthz", get(api::health))
+        .route("/readyz", get(api::ready))
+        .route("/v1/claims", post(api::append_claim))
+        .route(
+            "/v1/claims/{claim_id}/supersede",
+            post(api::supersede_claim),
+        )
+        .route("/v1/recall", post(api::recall))
+        .with_state(store)
+}

@@ -10,6 +10,6 @@ RUN cargo build --locked --release --bin fiducia-memory \
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build --chown=65532:65532 /build/target/release/fiducia-memory /usr/local/bin/fiducia-memory
-EXPOSE 8100
+EXPOSE 8090 8100
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/fiducia-memory"]
