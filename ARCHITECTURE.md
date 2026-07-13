@@ -406,9 +406,12 @@ Grounded in README "Scope & roadmap" and verified against the code:
 - **Contradiction signal on the durable path.** `contradicted_by_accepted_claim`
   is only meaningful for candidates built by an epistemic caller; the fused
   endpoint sets it `false` (§5.5).
-- **Live-database integration tests.** The 15 offline tests cover the pure
-  core (ledger lifecycle, fusion invariants, projection, literals/digests);
-  the Postgres paths await a throwaway-database harness.
+- **Live-database integration tests.** The 16 offline unit tests (in-module,
+  no `tests/` dir) cover the pure core — ledger lifecycle (`claims.rs`, 4),
+  fusion invariants (`recall.rs`, 5), trust + store semantics (`memory.rs`,
+  2), durable-hit projection (`fusion.rs`, 3), and literal/digest formatting
+  (`postgres.rs`, `durable/store.rs`, 1 each); the Postgres paths await a
+  throwaway-database harness.
 
 ## 8. Operations
 
