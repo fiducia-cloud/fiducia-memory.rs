@@ -257,17 +257,37 @@ impl PostgresMemory {
         subject: &str,
         predicate: &str,
     ) -> Result<Option<serde_json::Value>, sqlx::Error> {
-        let row = sqlx::query(
-            "select value from claims where tenant_id=$1 and namespace=$2 and subject=$3 and predicate=$4 and status='accepted'",
-        )
-        .bind(tenant)
-        .bind(namespace)
-        .bind(subject)
-        .bind(predicate)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(|row| row.get::<serde_json::Value, _>("value")))
+        self.with_tenant(tenant, |tx| {
+            Box::pin(async move {
+                let row = sqlx::query(
+                    "select value from claims where tenant_id=$1 and namespace=$2 and subject=$3 and predicate=$4 and status='accepted'",
+                )
+                .bind(tenant)
+                .bind(namespace)
+                .bind(subject)
+                .bind(predicate)
+                .fetch_optional(&mut **tx)
+                .await?;
+                Ok(row.map(|row| row.get::<serde_json::Value, _>("value")))
+            })
+        })
+        .await
     }
+}
+
+/// Bind the per-request `fiducia.tenant_id` GUC on `tx` with `SET LOCAL`
+/// semantics (`set_config(..., true)`), so RLS policies on that transaction's
+/// connection filter to `tenant`. The `true` (is_local) argument scopes the
+/// setting to the transaction; it is released on commit/rollback.
+pub(crate) async fn bind_tenant(
+    tx: &mut Transaction<'static, Postgres>,
+    tenant: TenantId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("select set_config('fiducia.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 /// Format an embedding as a pgvector text literal: `[1,2,3]`.
