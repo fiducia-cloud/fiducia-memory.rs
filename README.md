@@ -129,9 +129,14 @@ The only requirement is the **pgvector** extension (`create extension vector`) �
 the schema does this for you. Queries use runtime `sqlx` binding, so the crate
 builds with no database reachable at compile time.
 
-Tenant isolation is enforced three ways: every query is tenant-scoped in code,
-the service sets a per-request `fiducia.tenant_id` GUC, and **row-level security
-policies** on `memories` / `claims` / `memory_edges` are the backstop.
+Tenant isolation is currently enforced **in code**: every query is tenant-scoped
+(and claims-ledger reads use the full `(tenant, namespace, subject, predicate)`
+uniqueness key). The schema also defines **row-level security policies** on
+`memories` / `claims` / `memory_edges` keyed on a `fiducia.tenant_id` setting, but
+the per-request `fiducia.tenant_id` GUC is **not currently wired** into the
+request path (the `set_tenant` helper is not invoked per request). Wiring
+per-request RLS is a separate design task; until it lands, the code-level
+tenant filters are the isolation boundary — not the RLS GUC.
 
 ## Running it
 
@@ -230,9 +235,11 @@ when running outside a trusted local session.
 - **All SQL is parameterized.** Every query uses `sqlx` bind parameters
   (`query`/`query_as` with `.bind(...)`); no SQL is built by string
   concatenation or `format!`. Embeddings are passed as bound `vector` parameters.
-- **Tenant isolation is enforced in code on every query**, backed by row-level
-  security policies on `memories` / `claims` / `memory_edges` keyed on the
-  per-request `fiducia.tenant_id` GUC.
+- **Tenant isolation is enforced in code on every query** (the claims ledger
+  additionally scopes reads on the full `(tenant, namespace, subject, predicate)`
+  key). Row-level security policies exist in the schema, but the per-request
+  `fiducia.tenant_id` GUC is **not currently wired** into the request path, so
+  code-level filters — not RLS — are today's isolation boundary.
 - **Request hardening:** a 2 MiB request-body limit, a 10 s per-request timeout,
   and a 5 s pool-acquire timeout are applied at the service layer; recall
   embeddings and page sizes are range-validated before they reach the database.

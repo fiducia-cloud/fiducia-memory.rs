@@ -2,9 +2,17 @@
 //!
 //! Runtime `sqlx::query(...).bind(...)` (no compile-time `DATABASE_URL`).
 //! Embeddings are passed as pgvector literals (`[a,b,c]`) cast to `vector` in
-//! SQL, so the crate needs no pgvector Rust binding to compile. Every query is
-//! tenant-scoped; production also sets the `fiducia.tenant_id` RLS GUC per
-//! request as a backstop.
+//! SQL, so the crate needs no pgvector Rust binding to compile.
+//!
+//! Tenant isolation is currently enforced **in code**: every query filters on
+//! `tenant_id` (and, for the claims ledger, the full `(tenant, namespace,
+//! subject, predicate)` key). A `set_tenant` helper exists and the schema
+//! defines row-level-security policies, but the per-request
+//! `fiducia.tenant_id` RLS GUC is **not currently wired** into the request
+//! path (`set_tenant` is not invoked per request, and with a connection pool a
+//! session-level `set_config` would not reliably bind to each query's
+//! connection). Wiring per-request RLS is tracked as a separate design task;
+//! until then the code-level filters are the isolation boundary.
 
 use crate::domain::{Claim, Memory, MemoryId, TenantId};
 use sqlx::{postgres::PgPoolOptions, PgPool, Row};
@@ -180,16 +188,22 @@ impl PostgresMemory {
         Ok(())
     }
 
+    /// Fetch the accepted claim value, scoped to the ledger's full uniqueness
+    /// key `(tenant, namespace, subject, predicate)`. `namespace` must be
+    /// included: a tenant can hold the same `(subject, predicate)` in multiple
+    /// namespaces, so omitting it could return a value from the wrong namespace.
     pub async fn accepted_claim_value(
         &self,
         tenant: TenantId,
+        namespace: &str,
         subject: &str,
         predicate: &str,
     ) -> Result<Option<serde_json::Value>, sqlx::Error> {
         let row = sqlx::query(
-            "select value from claims where tenant_id=$1 and subject=$2 and predicate=$3 and status='accepted'",
+            "select value from claims where tenant_id=$1 and namespace=$2 and subject=$3 and predicate=$4 and status='accepted'",
         )
         .bind(tenant)
+        .bind(namespace)
         .bind(subject)
         .bind(predicate)
         .fetch_optional(&self.pool)
