@@ -172,27 +172,32 @@ impl PostgresMemory {
         limit: i64,
     ) -> Result<Vec<ScoredRow>, sqlx::Error> {
         let literal = pgvector_literal(query_embedding);
-        let rows = sqlx::query(
-            "select m.id, m.content, 1 - (e.embedding <=> $1::vector) as semantic \
-             from memories m join memory_embeddings e on e.memory_id = m.id \
-             where m.tenant_id = $2 and e.model = $3 and m.forgotten_at is null \
-               and m.superseded_by is null and (m.valid_until is null or m.valid_until > now()) \
-             order by e.embedding <=> $1::vector asc limit $4",
-        )
-        .bind(literal)
-        .bind(tenant)
-        .bind(model)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .map(|row| ScoredRow {
-                memory_id: row.get::<Uuid, _>("id"),
-                content: row.get::<String, _>("content"),
-                semantic_score: row.get::<f64, _>("semantic") as f32,
+        self.with_tenant(tenant, |tx| {
+            Box::pin(async move {
+                let rows = sqlx::query(
+                    "select m.id, m.content, 1 - (e.embedding <=> $1::vector) as semantic \
+                     from memories m join memory_embeddings e on e.memory_id = m.id \
+                     where m.tenant_id = $2 and e.model = $3 and m.forgotten_at is null \
+                       and m.superseded_by is null and (m.valid_until is null or m.valid_until > now()) \
+                     order by e.embedding <=> $1::vector asc limit $4",
+                )
+                .bind(literal)
+                .bind(tenant)
+                .bind(model)
+                .bind(limit)
+                .fetch_all(&mut **tx)
+                .await?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| ScoredRow {
+                        memory_id: row.get::<Uuid, _>("id"),
+                        content: row.get::<String, _>("content"),
+                        semantic_score: row.get::<f64, _>("semantic") as f32,
+                    })
+                    .collect())
             })
-            .collect())
+        })
+        .await
     }
 
     /// Upsert a claim by (tenant, namespace, subject, predicate) — the durable
