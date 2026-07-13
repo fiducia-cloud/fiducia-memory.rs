@@ -145,6 +145,18 @@ DATABASE_URL=postgres://user:pass@host/db  cargo run
 # listens on 127.0.0.1:8100 (override with FIDUCIA_MEMORY_BIND)
 ```
 
+The same non-secret settings are available through the pinned, audited
+`flags-2-env` launcher:
+
+```bash
+make -B -C vendor/flags-2-env all
+DATABASE_URL=postgres://user:pass@host/db scripts/with-flags2env.sh --bind=127.0.0.1:8100 -- cargo run --locked
+DATABASE_URL=postgres://user:pass@host/db scripts/with-flags2env.sh --migrate -- cargo run --locked
+```
+
+`DATABASE_URL` is deliberately environment-only because it may contain
+credentials.
+
 ### HTTP API
 
 One router, mounted over a single shared `PgPool`, exposes **both** endpoint

@@ -98,7 +98,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Apply ALL migrations (durable `memory_claims` + epistemic schema).
     durable.migrate().await?;
 
-    if std::env::args().any(|a| a == "--migrate") {
+    let migrate_only = std::env::args().any(|a| a == "--migrate")
+        || std::env::var("FIDUCIA_MEMORY_MIGRATE").as_deref() == Ok("true");
+    if migrate_only {
         tracing::info!("schema applied");
         println!("fiducia-memory: schema applied");
         return Ok(());
