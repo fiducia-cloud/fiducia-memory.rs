@@ -92,19 +92,26 @@ impl PostgresMemory {
     ///
     /// `tenant` is bound as text and cast per the policies'
     /// `nullif(current_setting('fiducia.tenant_id', true), '')::uuid`.
-    pub async fn with_tenant<T, F>(&self, tenant: TenantId, f: F) -> Result<T, sqlx::Error>
+    /// The closure takes OWNERSHIP of the tenant-scoped transaction, runs its
+    /// statements on it, and returns it alongside the result so `with_tenant` can
+    /// commit. Ownership (rather than a borrowed `&mut tx`) is what keeps caller
+    /// references — e.g. a `&Memory` bound into the query — out of a higher-
+    /// ranked lifetime that would otherwise force them to be `'static`.
+    pub async fn with_tenant<T, F, Fut>(&self, tenant: TenantId, f: F) -> Result<T, sqlx::Error>
     where
-        F: for<'c> FnOnce(&'c mut Transaction<'static, Postgres>) -> TxFuture<'c, T>,
+        F: FnOnce(TenantTx) -> Fut,
+        Fut: Future<Output = Result<(TenantTx, T), sqlx::Error>>,
     {
         let mut tx = self.pool.begin().await?;
         bind_tenant(&mut tx, tenant).await?;
-        let out = f(&mut tx).await?;
+        let (tx, out) = f(tx).await?;
         tx.commit().await?;
         Ok(out)
     }
 
     pub async fn insert_memory(&self, memory: &Memory) -> Result<(), sqlx::Error> {
-        self.with_tenant(memory.tenant_id, |tx| {
+        let memory = memory.clone();
+        self.with_tenant(memory.tenant_id, move |tx| {
             Box::pin(async move {
                 sqlx::query(
                     "insert into memories (id, tenant_id, namespace, memory_type, content, metadata, provenance, trust_score, importance, valid_from, valid_until) \
@@ -144,7 +151,8 @@ impl PostgresMemory {
         embedding: &[f32],
     ) -> Result<(), sqlx::Error> {
         let literal = pgvector_literal(embedding);
-        self.with_tenant(tenant, |tx| {
+        let model = model.to_string();
+        self.with_tenant(tenant, move |tx| {
             Box::pin(async move {
                 sqlx::query(
                     "insert into memory_embeddings (memory_id, model, embedding) values ($1,$2,$3::vector) \
@@ -173,7 +181,8 @@ impl PostgresMemory {
         limit: i64,
     ) -> Result<Vec<ScoredRow>, sqlx::Error> {
         let literal = pgvector_literal(query_embedding);
-        self.with_tenant(tenant, |tx| {
+        let model = model.to_string();
+        self.with_tenant(tenant, move |tx| {
             Box::pin(async move {
                 let rows = sqlx::query(
                     "select m.id, m.content, 1 - (e.embedding <=> $1::vector) as semantic \
@@ -212,7 +221,8 @@ impl PostgresMemory {
     pub async fn upsert_claim(&self, claim: &Claim) -> Result<(), sqlx::Error> {
         let author_uuid = Uuid::parse_str(&claim.author).ok();
         let status = format!("{:?}", claim.status).to_lowercase();
-        self.with_tenant(claim.tenant_id, |tx| {
+        let claim = claim.clone();
+        self.with_tenant(claim.tenant_id, move |tx| {
             Box::pin(async move {
                 sqlx::query(
                     "insert into claims (id, tenant_id, namespace, subject, predicate, value, confidence, author_agent_id, status, evidence, supporters, contests, resolved_by, superseded_by, valid_until, claim_version) \
@@ -258,7 +268,10 @@ impl PostgresMemory {
         subject: &str,
         predicate: &str,
     ) -> Result<Option<serde_json::Value>, sqlx::Error> {
-        self.with_tenant(tenant, |tx| {
+        let namespace = namespace.to_string();
+        let subject = subject.to_string();
+        let predicate = predicate.to_string();
+        self.with_tenant(tenant, move |tx| {
             Box::pin(async move {
                 let row = sqlx::query(
                     "select value from claims where tenant_id=$1 and namespace=$2 and subject=$3 and predicate=$4 and status='accepted'",
