@@ -74,6 +74,8 @@ impl MemoryStore {
         embedding: Vector,
     ) -> Result<Claim, StoreError> {
         let mut tx = self.pool.begin().await?;
+        // Wire per-request RLS on this transaction's connection (see `append`).
+        bind_tenant(&mut tx, tenant_id).await?;
         let updated = sqlx::query("UPDATE memory_claims SET valid_until = COALESCE(valid_until, now()) WHERE claim_id = $1 AND tenant_id = $2 AND valid_until IS NULL")
             .bind(old_id).bind(tenant_id).execute(&mut *tx).await?;
         if updated.rows_affected() == 0 {
