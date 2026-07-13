@@ -93,7 +93,7 @@ sql/
 The **library core is pure and deterministic** — the claim ledger, the recall
 fusion, and the durable→fusion bridge are plain functions of their inputs, so
 the full lifecycle, ranking, and candidate projection are unit-tested without a
-database (`cargo test`, 15 tests, all green offline).
+database (`cargo test --locked`, 15 tests, all green offline).
 
 ### Memory types
 
@@ -143,10 +143,10 @@ including when the service connects as the table owner.
 ```bash
 # The service applies ALL migrations on boot (sqlx::migrate! over migrations/).
 # To apply the schema and exit (idempotent; needs pgvector):
-DATABASE_URL=postgres://user:pass@host/db  cargo run -- --migrate
+DATABASE_URL=postgres://user:pass@host/db  cargo run --locked -- --migrate
 
 # Serve (also migrates on boot):
-DATABASE_URL=postgres://user:pass@host/db  cargo run
+DATABASE_URL=postgres://user:pass@host/db  cargo run --locked
 # listens on 127.0.0.1:8100 (override with FIDUCIA_MEMORY_BIND)
 ```
 
@@ -232,7 +232,7 @@ For non-secret settings, the pinned
 ```bash
 git submodule update --init --recursive
 make -B -C vendor/flags-2-env all
-DATABASE_URL="$DATABASE_URL" scripts/with-flags2env.sh --bind=0.0.0.0:8100 -- cargo run
+DATABASE_URL="$DATABASE_URL" scripts/with-flags2env.sh --bind=0.0.0.0:8100 -- cargo run --locked
 ```
 
 `scripts/with-flags2env.sh` runs the parser against `.cli-flags.toml`, exports the
@@ -285,7 +285,7 @@ Deliberately **not yet** wired, and where each goes:
   already persists the whole lifecycle, so this is a read-path addition.
 - **Live-service integration tests.** The pure core is thoroughly unit-tested;
   the Postgres layer needs a throwaway Postgres (e.g. testcontainers) to test
-  end-to-end, which is out of scope for offline `cargo test`.
+  end-to-end, which is out of scope for offline `cargo test --locked`.
 
 These are marked as follow-ups rather than hidden — nothing above is stubbed or
 faked; the boundaries are simply drawn where an external dependency begins.
