@@ -4,19 +4,33 @@
 //! Embeddings are passed as pgvector literals (`[a,b,c]`) cast to `vector` in
 //! SQL, so the crate needs no pgvector Rust binding to compile.
 //!
-//! Tenant isolation is currently enforced **in code**: every query filters on
-//! `tenant_id` (and, for the claims ledger, the full `(tenant, namespace,
-//! subject, predicate)` key). A `set_tenant` helper exists and the schema
-//! defines row-level-security policies, but the per-request
-//! `fiducia.tenant_id` RLS GUC is **not currently wired** into the request
-//! path (`set_tenant` is not invoked per request, and with a connection pool a
-//! session-level `set_config` would not reliably bind to each query's
-//! connection). Wiring per-request RLS is tracked as a separate design task;
-//! until then the code-level filters are the isolation boundary.
+//! Tenant isolation is enforced in **two** layers (defense in depth):
+//!
+//! 1. **Row-level security (the backstop).** Every tenant-scoped query runs
+//!    inside a transaction opened by [`PostgresMemory::with_tenant`], which
+//!    first binds the per-request `fiducia.tenant_id` GUC with
+//!    `set_config('fiducia.tenant_id', $tenant, true)` — the bindable form of
+//!    `SET LOCAL`, so the setting is scoped to *that* transaction and released
+//!    on commit/rollback. Because the GUC is set on the *same* pooled
+//!    connection that then runs the query, the RLS policies (`migrations/0002`
+//!    + `migrations/0003`, which additionally `FORCE` RLS so it applies even to
+//!      the table owner) filter every row. A pooled connection therefore never
+//!      leaks tenant state between requests.
+//! 2. **Code-level `tenant_id = $n` filters (belt-and-suspenders).** Every
+//!    query *also* filters on `tenant_id` explicitly (and, for the claims
+//!    ledger, the full `(tenant, namespace, subject, predicate)` key), so a
+//!    query is correct even if RLS were somehow disabled.
 
 use crate::domain::{Claim, Memory, MemoryId, TenantId};
-use sqlx::{postgres::PgPoolOptions, PgPool, Row};
+use sqlx::{postgres::PgPoolOptions, PgPool, Postgres, Row, Transaction};
+use std::future::Future;
 use uuid::Uuid;
+
+/// A tenant-scoped transaction handed to (and returned by) the closure passed to
+/// [`PostgresMemory::with_tenant`]. It is `'static` because it is borrowed from
+/// the pool (it owns its pooled connection), which lets the closure own it —
+/// running its statements on it — without entangling caller lifetimes.
+type TenantTx = Transaction<'static, Postgres>;
 
 #[derive(Clone)]
 pub struct PostgresMemory {
@@ -62,55 +76,97 @@ impl PostgresMemory {
         crate::db::apply_schema(&self.pool).await
     }
 
-    /// Set the per-connection tenant GUC so row-level security scopes the session.
-    pub async fn set_tenant(&self, tenant: TenantId) -> Result<(), sqlx::Error> {
-        sqlx::query("select set_config('fiducia.tenant_id', $1, false)")
-            .bind(tenant.to_string())
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+    /// Run `f` inside a transaction whose `fiducia.tenant_id` GUC is bound to
+    /// `tenant`, then commit. This is the ONE place per-request RLS is wired:
+    ///
+    /// * `set_config('fiducia.tenant_id', $tenant, true)` is the bindable
+    ///   equivalent of `SET LOCAL` (`is_local = true`), so the GUC is scoped to
+    ///   this transaction and released on commit/rollback — a pooled connection
+    ///   never carries tenant state between requests.
+    /// * The GUC is set on the SAME connection the closure's statements run on
+    ///   (the transaction), so the RLS policies actually filter the query. This
+    ///   correctness point is why every tenant-scoped query MUST go through here
+    ///   rather than run on `&self.pool` directly — with a pool, a query on a
+    ///   bare pool handle could land on a different connection than the one the
+    ///   GUC was set on, and RLS would then hide every row.
+    ///
+    /// `tenant` is bound as text and cast per the policies'
+    /// `nullif(current_setting('fiducia.tenant_id', true), '')::uuid`.
+    /// The closure takes OWNERSHIP of the tenant-scoped transaction, runs its
+    /// statements on it, and returns it alongside the result so `with_tenant` can
+    /// commit. Ownership (rather than a borrowed `&mut tx`) is what keeps caller
+    /// references — e.g. a `&Memory` bound into the query — out of a higher-
+    /// ranked lifetime that would otherwise force them to be `'static`.
+    pub async fn with_tenant<T, F, Fut>(&self, tenant: TenantId, f: F) -> Result<T, sqlx::Error>
+    where
+        F: FnOnce(TenantTx) -> Fut,
+        Fut: Future<Output = Result<(TenantTx, T), sqlx::Error>>,
+    {
+        let mut tx = self.pool.begin().await?;
+        bind_tenant(&mut tx, tenant).await?;
+        let (tx, out) = f(tx).await?;
+        tx.commit().await?;
+        Ok(out)
     }
 
     pub async fn insert_memory(&self, memory: &Memory) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "insert into memories (id, tenant_id, namespace, memory_type, content, metadata, provenance, trust_score, importance, valid_from, valid_until) \
-             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-        )
-        .bind(memory.id)
-        .bind(memory.tenant_id)
-        .bind(&memory.namespace)
-        .bind(memory.memory_type.as_str())
-        .bind(&memory.content)
-        .bind(serde_json::to_value(&memory.metadata).expect("serializable"))
-        .bind(serde_json::to_value(&memory.provenance).expect("serializable"))
-        .bind(memory.trust_score)
-        .bind(memory.importance)
-        .bind(memory.valid_from)
-        .bind(memory.valid_until)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        let memory = memory.clone();
+        self.with_tenant(memory.tenant_id, move |mut tx| {
+            Box::pin(async move {
+                sqlx::query(
+                    "insert into memories (id, tenant_id, namespace, memory_type, content, metadata, provenance, trust_score, importance, valid_from, valid_until) \
+                     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+                )
+                .bind(memory.id)
+                .bind(memory.tenant_id)
+                .bind(&memory.namespace)
+                .bind(memory.memory_type.as_str())
+                .bind(&memory.content)
+                .bind(serde_json::to_value(&memory.metadata).expect("serializable"))
+                .bind(serde_json::to_value(&memory.provenance).expect("serializable"))
+                .bind(memory.trust_score)
+                .bind(memory.importance)
+                .bind(memory.valid_from)
+                .bind(memory.valid_until)
+                .execute(&mut *tx)
+                .await?;
+                Ok((tx, ()))
+            })
+        })
+        .await
     }
 
     /// Store (or replace) a memory's embedding for a given model. The embedding
     /// is written as a pgvector literal cast in SQL.
+    ///
+    /// `tenant` is required because `memory_embeddings` carries no `tenant_id`
+    /// of its own: its RLS policy (and INSERT `WITH CHECK`) is scoped through
+    /// the parent `memories` row, so the `fiducia.tenant_id` GUC MUST be set to
+    /// the owning tenant for the write to be admitted.
     pub async fn upsert_embedding(
         &self,
+        tenant: TenantId,
         memory_id: MemoryId,
         model: &str,
         embedding: &[f32],
     ) -> Result<(), sqlx::Error> {
         let literal = pgvector_literal(embedding);
-        sqlx::query(
-            "insert into memory_embeddings (memory_id, model, embedding) values ($1,$2,$3::vector) \
-             on conflict (memory_id, model) do update set embedding = excluded.embedding, created_at = now()",
-        )
-        .bind(memory_id)
-        .bind(model)
-        .bind(literal)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        let model = model.to_string();
+        self.with_tenant(tenant, move |mut tx| {
+            Box::pin(async move {
+                sqlx::query(
+                    "insert into memory_embeddings (memory_id, model, embedding) values ($1,$2,$3::vector) \
+                     on conflict (memory_id, model) do update set embedding = excluded.embedding, created_at = now()",
+                )
+                .bind(memory_id)
+                .bind(model)
+                .bind(literal)
+                .execute(&mut *tx)
+                .await?;
+                Ok((tx, ()))
+            })
+        })
+        .await
     }
 
     /// Nearest memories to `query_embedding` by cosine distance, scoped to the
@@ -125,27 +181,34 @@ impl PostgresMemory {
         limit: i64,
     ) -> Result<Vec<ScoredRow>, sqlx::Error> {
         let literal = pgvector_literal(query_embedding);
-        let rows = sqlx::query(
-            "select m.id, m.content, 1 - (e.embedding <=> $1::vector) as semantic \
-             from memories m join memory_embeddings e on e.memory_id = m.id \
-             where m.tenant_id = $2 and e.model = $3 and m.forgotten_at is null \
-               and m.superseded_by is null and (m.valid_until is null or m.valid_until > now()) \
-             order by e.embedding <=> $1::vector asc limit $4",
-        )
-        .bind(literal)
-        .bind(tenant)
-        .bind(model)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .map(|row| ScoredRow {
-                memory_id: row.get::<Uuid, _>("id"),
-                content: row.get::<String, _>("content"),
-                semantic_score: row.get::<f64, _>("semantic") as f32,
+        let model = model.to_string();
+        self.with_tenant(tenant, move |mut tx| {
+            Box::pin(async move {
+                let rows = sqlx::query(
+                    "select m.id, m.content, 1 - (e.embedding <=> $1::vector) as semantic \
+                     from memories m join memory_embeddings e on e.memory_id = m.id \
+                     where m.tenant_id = $2 and e.model = $3 and m.forgotten_at is null \
+                       and m.superseded_by is null and (m.valid_until is null or m.valid_until > now()) \
+                     order by e.embedding <=> $1::vector asc limit $4",
+                )
+                .bind(literal)
+                .bind(tenant)
+                .bind(model)
+                .bind(limit)
+                .fetch_all(&mut *tx)
+                .await?;
+                let rows = rows
+                    .into_iter()
+                    .map(|row| ScoredRow {
+                        memory_id: row.get::<Uuid, _>("id"),
+                        content: row.get::<String, _>("content"),
+                        semantic_score: row.get::<f64, _>("semantic") as f32,
+                    })
+                    .collect();
+                Ok((tx, rows))
             })
-            .collect())
+        })
+        .await
     }
 
     /// Upsert a claim by (tenant, namespace, subject, predicate) — the durable
@@ -158,34 +221,41 @@ impl PostgresMemory {
     /// — value, confidence, status, evidence, supporters, contests — round-trips.
     pub async fn upsert_claim(&self, claim: &Claim) -> Result<(), sqlx::Error> {
         let author_uuid = Uuid::parse_str(&claim.author).ok();
-        sqlx::query(
-            "insert into claims (id, tenant_id, namespace, subject, predicate, value, confidence, author_agent_id, status, evidence, supporters, contests, resolved_by, superseded_by, valid_until, claim_version) \
-             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) \
-             on conflict (tenant_id, namespace, subject, predicate) do update set \
-               value=excluded.value, confidence=excluded.confidence, status=excluded.status, evidence=excluded.evidence, \
-               supporters=excluded.supporters, contests=excluded.contests, resolved_by=excluded.resolved_by, \
-               superseded_by=excluded.superseded_by, valid_until=excluded.valid_until, \
-               claim_version=excluded.claim_version, updated_at=now()",
-        )
-        .bind(claim.id)
-        .bind(claim.tenant_id)
-        .bind(&claim.namespace)
-        .bind(&claim.subject)
-        .bind(&claim.predicate)
-        .bind(&claim.value)
-        .bind(claim.confidence)
-        .bind(author_uuid)
-        .bind(format!("{:?}", claim.status).to_lowercase())
-        .bind(serde_json::to_value(&claim.evidence).expect("serializable"))
-        .bind(serde_json::to_value(&claim.supporters).expect("serializable"))
-        .bind(serde_json::to_value(&claim.contests).expect("serializable"))
-        .bind(&claim.resolved_by)
-        .bind(claim.superseded_by)
-        .bind(claim.valid_until)
-        .bind(claim.claim_version as i64)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        let status = format!("{:?}", claim.status).to_lowercase();
+        let claim = claim.clone();
+        self.with_tenant(claim.tenant_id, move |mut tx| {
+            Box::pin(async move {
+                sqlx::query(
+                    "insert into claims (id, tenant_id, namespace, subject, predicate, value, confidence, author_agent_id, status, evidence, supporters, contests, resolved_by, superseded_by, valid_until, claim_version) \
+                     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) \
+                     on conflict (tenant_id, namespace, subject, predicate) do update set \
+                       value=excluded.value, confidence=excluded.confidence, status=excluded.status, evidence=excluded.evidence, \
+                       supporters=excluded.supporters, contests=excluded.contests, resolved_by=excluded.resolved_by, \
+                       superseded_by=excluded.superseded_by, valid_until=excluded.valid_until, \
+                       claim_version=excluded.claim_version, updated_at=now()",
+                )
+                .bind(claim.id)
+                .bind(claim.tenant_id)
+                .bind(&claim.namespace)
+                .bind(&claim.subject)
+                .bind(&claim.predicate)
+                .bind(&claim.value)
+                .bind(claim.confidence)
+                .bind(author_uuid)
+                .bind(status)
+                .bind(serde_json::to_value(&claim.evidence).expect("serializable"))
+                .bind(serde_json::to_value(&claim.supporters).expect("serializable"))
+                .bind(serde_json::to_value(&claim.contests).expect("serializable"))
+                .bind(&claim.resolved_by)
+                .bind(claim.superseded_by)
+                .bind(claim.valid_until)
+                .bind(claim.claim_version as i64)
+                .execute(&mut *tx)
+                .await?;
+                Ok((tx, ()))
+            })
+        })
+        .await
     }
 
     /// Fetch the accepted claim value, scoped to the ledger's full uniqueness
@@ -199,17 +269,41 @@ impl PostgresMemory {
         subject: &str,
         predicate: &str,
     ) -> Result<Option<serde_json::Value>, sqlx::Error> {
-        let row = sqlx::query(
-            "select value from claims where tenant_id=$1 and namespace=$2 and subject=$3 and predicate=$4 and status='accepted'",
-        )
-        .bind(tenant)
-        .bind(namespace)
-        .bind(subject)
-        .bind(predicate)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(|row| row.get::<serde_json::Value, _>("value")))
+        let namespace = namespace.to_string();
+        let subject = subject.to_string();
+        let predicate = predicate.to_string();
+        self.with_tenant(tenant, move |mut tx| {
+            Box::pin(async move {
+                let row = sqlx::query(
+                    "select value from claims where tenant_id=$1 and namespace=$2 and subject=$3 and predicate=$4 and status='accepted'",
+                )
+                .bind(tenant)
+                .bind(namespace)
+                .bind(subject)
+                .bind(predicate)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let value = row.map(|row| row.get::<serde_json::Value, _>("value"));
+                Ok((tx, value))
+            })
+        })
+        .await
     }
+}
+
+/// Bind the per-request `fiducia.tenant_id` GUC on `tx` with `SET LOCAL`
+/// semantics (`set_config(..., true)`), so RLS policies on that transaction's
+/// connection filter to `tenant`. The `true` (is_local) argument scopes the
+/// setting to the transaction; it is released on commit/rollback.
+pub(crate) async fn bind_tenant(
+    tx: &mut Transaction<'static, Postgres>,
+    tenant: TenantId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("select set_config('fiducia.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 /// Format an embedding as a pgvector text literal: `[1,2,3]`.
