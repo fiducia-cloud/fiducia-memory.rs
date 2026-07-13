@@ -10,6 +10,7 @@ use crate::durable::model::{AppendClaim, Claim, RecallHit, RecallRequest};
 use pgvector::Vector;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
+use std::fmt::Write as _;
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -131,12 +132,20 @@ async fn insert_claim(
     input: &AppendClaim,
     embedding: Vector,
 ) -> Result<Claim, sqlx::Error> {
-    let digest = format!("{:x}", Sha256::digest(input.content.as_bytes()));
+    let digest = sha256_hex(input.content.as_bytes());
     sqlx::query_as::<_, Claim>("INSERT INTO memory_claims (tenant_id, subject, predicate, object, source, confidence, content, content_sha256, embedding, valid_from, valid_until, supersedes_claim_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10,now()),$11,$12) RETURNING claim_id,tenant_id,subject,predicate,object,source,confidence,content,content_sha256,valid_from,valid_until,supersedes_claim_id,created_at")
         .bind(input.tenant_id).bind(input.subject.trim()).bind(input.predicate.trim())
         .bind(&input.object).bind(&input.source).bind(input.confidence).bind(input.content.trim())
         .bind(digest).bind(embedding).bind(input.valid_from).bind(input.valid_until)
         .bind(input.supersedes_claim_id).fetch_one(&mut **tx).await
+}
+
+fn sha256_hex(input: &[u8]) -> String {
+    let mut encoded = String::with_capacity(64);
+    for byte in Sha256::digest(input) {
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
 }
 
 impl AppendClaim {
@@ -154,5 +163,18 @@ impl AppendClaim {
             valid_until: self.valid_until,
             supersedes_claim_id: Some(old_id),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sha256_hex;
+
+    #[test]
+    fn sha256_hex_is_canonical_lowercase() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 }

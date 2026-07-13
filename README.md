@@ -93,7 +93,7 @@ sql/
 The **library core is pure and deterministic** — the claim ledger, the recall
 fusion, and the durable→fusion bridge are plain functions of their inputs, so
 the full lifecycle, ranking, and candidate projection are unit-tested without a
-database (`cargo test`, 15 tests, all green offline).
+database (`cargo test --locked`, 15 tests, all green offline).
 
 ### Memory types
 
@@ -143,12 +143,24 @@ including when the service connects as the table owner.
 ```bash
 # The service applies ALL migrations on boot (sqlx::migrate! over migrations/).
 # To apply the schema and exit (idempotent; needs pgvector):
-DATABASE_URL=postgres://user:pass@host/db  cargo run -- --migrate
+DATABASE_URL=postgres://user:pass@host/db  cargo run --locked -- --migrate
 
 # Serve (also migrates on boot):
-DATABASE_URL=postgres://user:pass@host/db  cargo run
+DATABASE_URL=postgres://user:pass@host/db  cargo run --locked
 # listens on 127.0.0.1:8100 (override with FIDUCIA_MEMORY_BIND)
 ```
+
+The same non-secret settings are available through the pinned, audited
+`flags-2-env` launcher:
+
+```bash
+make -B -C vendor/flags-2-env all
+DATABASE_URL=postgres://user:pass@host/db scripts/with-flags2env.sh --bind=127.0.0.1:8100 -- cargo run --locked
+DATABASE_URL=postgres://user:pass@host/db scripts/with-flags2env.sh --migrate -- cargo run --locked
+```
+
+`DATABASE_URL` is deliberately environment-only because it may contain
+credentials.
 
 ### HTTP API
 
@@ -212,23 +224,28 @@ The service is configured entirely through environment variables:
 
 ### CLI flags → env (flags-2-env)
 
-Rather than exporting the vars by hand, the pinned
+For non-secret settings, the pinned
 [`ORESoftware/flags-2-env`](https://github.com/ORESoftware/flags-2-env) parser
 (vendored at `vendor/flags-2-env`) maps CLI flags to these env vars from the
 `.cli-flags.toml` schema. The schema is audited in CI (`.github/workflows/cli-flags.yml`).
 
 ```bash
 git submodule update --init --recursive
-make -C vendor/flags-2-env all
-scripts/with-flags2env.sh --db=postgres://user:pass@host/db --bind=0.0.0.0:8100 -- cargo run
+make -B -C vendor/flags-2-env all
+DATABASE_URL="$DATABASE_URL" scripts/with-flags2env.sh --bind=0.0.0.0:8100 -- cargo run --locked
 ```
 
 `scripts/with-flags2env.sh` runs the parser against `.cli-flags.toml`, exports the
-resulting env map, then execs the command. Because `DATABASE_URL` is secret,
-prefer supplying it directly from your secret store rather than as a shell flag
-when running outside a trusted local session.
+resulting env map, then execs the command. `DATABASE_URL` is deliberately excluded
+from the CLI schema; inject it through the environment or a secret store so it
+cannot leak through shell history or process listings.
 
 ## Security & hardening
+
+CI uses Rust `1.95.0`, locked Cargo resolution, warnings-as-errors Clippy, the
+full test suite, and a required advisory scan. The container uses the same exact
+Rust release for its build and an explicit numeric non-root distroless runtime;
+Dependabot tracks Cargo, actions, and Docker inputs weekly.
 
 - **`cargo audit` is clean** — no known advisories affect the dependency tree
   (218 crates scanned). No advisories are currently accepted/waived.
@@ -268,7 +285,7 @@ Deliberately **not yet** wired, and where each goes:
   already persists the whole lifecycle, so this is a read-path addition.
 - **Live-service integration tests.** The pure core is thoroughly unit-tested;
   the Postgres layer needs a throwaway Postgres (e.g. testcontainers) to test
-  end-to-end, which is out of scope for offline `cargo test`.
+  end-to-end, which is out of scope for offline `cargo test --locked`.
 
 These are marked as follow-ups rather than hidden — nothing above is stubbed or
 faked; the boundaries are simply drawn where an external dependency begins.
