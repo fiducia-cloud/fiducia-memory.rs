@@ -75,34 +75,57 @@ impl PostgresMemory {
         crate::db::apply_schema(&self.pool).await
     }
 
-    /// Set the per-connection tenant GUC so row-level security scopes the session.
-    pub async fn set_tenant(&self, tenant: TenantId) -> Result<(), sqlx::Error> {
-        sqlx::query("select set_config('fiducia.tenant_id', $1, false)")
-            .bind(tenant.to_string())
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+    /// Run `f` inside a transaction whose `fiducia.tenant_id` GUC is bound to
+    /// `tenant`, then commit. This is the ONE place per-request RLS is wired:
+    ///
+    /// * `set_config('fiducia.tenant_id', $tenant, true)` is the bindable
+    ///   equivalent of `SET LOCAL` (`is_local = true`), so the GUC is scoped to
+    ///   this transaction and released on commit/rollback — a pooled connection
+    ///   never carries tenant state between requests.
+    /// * The GUC is set on the SAME connection the closure's statements run on
+    ///   (the transaction), so the RLS policies actually filter the query. This
+    ///   correctness point is why every tenant-scoped query MUST go through here
+    ///   rather than run on `&self.pool` directly — with a pool, a query on a
+    ///   bare pool handle could land on a different connection than the one the
+    ///   GUC was set on, and RLS would then hide every row.
+    ///
+    /// `tenant` is bound as text and cast per the policies'
+    /// `nullif(current_setting('fiducia.tenant_id', true), '')::uuid`.
+    pub async fn with_tenant<T, F>(&self, tenant: TenantId, f: F) -> Result<T, sqlx::Error>
+    where
+        F: for<'c> FnOnce(&'c mut Transaction<'static, Postgres>) -> TxFuture<'c, T>,
+    {
+        let mut tx = self.pool.begin().await?;
+        bind_tenant(&mut tx, tenant).await?;
+        let out = f(&mut tx).await?;
+        tx.commit().await?;
+        Ok(out)
     }
 
     pub async fn insert_memory(&self, memory: &Memory) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "insert into memories (id, tenant_id, namespace, memory_type, content, metadata, provenance, trust_score, importance, valid_from, valid_until) \
-             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-        )
-        .bind(memory.id)
-        .bind(memory.tenant_id)
-        .bind(&memory.namespace)
-        .bind(memory.memory_type.as_str())
-        .bind(&memory.content)
-        .bind(serde_json::to_value(&memory.metadata).expect("serializable"))
-        .bind(serde_json::to_value(&memory.provenance).expect("serializable"))
-        .bind(memory.trust_score)
-        .bind(memory.importance)
-        .bind(memory.valid_from)
-        .bind(memory.valid_until)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        self.with_tenant(memory.tenant_id, |tx| {
+            Box::pin(async move {
+                sqlx::query(
+                    "insert into memories (id, tenant_id, namespace, memory_type, content, metadata, provenance, trust_score, importance, valid_from, valid_until) \
+                     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+                )
+                .bind(memory.id)
+                .bind(memory.tenant_id)
+                .bind(&memory.namespace)
+                .bind(memory.memory_type.as_str())
+                .bind(&memory.content)
+                .bind(serde_json::to_value(&memory.metadata).expect("serializable"))
+                .bind(serde_json::to_value(&memory.provenance).expect("serializable"))
+                .bind(memory.trust_score)
+                .bind(memory.importance)
+                .bind(memory.valid_from)
+                .bind(memory.valid_until)
+                .execute(&mut **tx)
+                .await?;
+                Ok(())
+            })
+        })
+        .await
     }
 
     /// Store (or replace) a memory's embedding for a given model. The embedding
