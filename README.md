@@ -36,24 +36,63 @@ Everything here is built around that line. Concretely:
 - **A memory contradicted by an accepted claim is heavily down-ranked** (×0.25),
   so an authoritative fact outranks a similar-but-stale memory.
 
+## Two layers, one crate
+
+This crate is the **semantic merge of two independent implementations** into one
+service. Nothing from either side was dropped.
+
+- **The durable storage floor** (`src/durable/*`) is the real Postgres system of
+  record: an **append-only `memory_claims` table** with a generated `tsvector`
+  search document, an **HNSW cosine index** over 1536-d embeddings,
+  **`content_sha256` active-dedup**, and **temporal supersession** via
+  `valid_until` / `supersedes_claim_id`. It is also the candidate-generation
+  engine for recall (`sql/recall.sql`).
+- **The epistemic layer** (the crate-root modules) is the reasoning on top: the
+  contestable **claim ledger** (assert → support → contest → resolve →
+  consensus), the five **memory types** + provenance trust, and the explainable
+  **hybrid recall fusion** (hard authorization/validity filters *before*
+  ranking, then lexical + semantic + trust + freshness, contradiction
+  down-rank, token-bounded pack).
+
+The two are joined by `src/fusion.rs`: **durable SQL recall generates
+candidates; the epistemic fusion ranks, filters, and explains them.**
+
 ## What's in the box
 
 ```
 src/
-  domain.rs      core types: MemoryType, Provenance, Memory, Claim, ClaimStatus, edges
+  domain.rs      core types: MemoryType, Provenance, Memory, Claim (ledger), ClaimStatus, edges
   claims.rs      the contestable claim ledger (assert/support/contest/resolve/supersede)
-  recall.rs      hybrid recall: fuse lexical+semantic+trust+freshness → ranked, token-bounded pack
+  recall.rs      hybrid recall FUSION: lexical+semantic+trust+freshness → ranked, token-bounded pack
   memory.rs      trust scoring + the MemoryStore trait + a deterministic in-memory store
-  postgres.rs    Postgres + pgvector persistence (runtime sqlx, no compile-time DATABASE_URL)
-  db.rs          applies the canonical schema
-  main.rs        the fiducia-memory HTTP service (axum)
+  postgres.rs    epistemic Postgres+pgvector persistence (runtime sqlx, no compile-time DATABASE_URL)
+  db.rs          applies the canonical epistemic schema via raw_sql (idempotent)
+  fusion.rs      the SEAM: projects durable RecallHits → recall::Candidate for the fusion
+  durable/
+    model.rs     durable request/row types (durable::model::Claim = a provenance FACT row)
+    store.rs     PgPool store over memory_claims: append / atomic supersede / recall / migrate / ping
+    api.rs       durable axum handlers (POST /v1/claims, /supersede, /v1/recall)
+  main.rs        the unified fiducia-memory HTTP service (axum) over ONE shared PgPool
+migrations/                     (applied on boot via sqlx::migrate!)
+  0001_memory.sql               durable floor: memory_claims (tsvector, HNSW, sha256 dedup, supersession)
+  0002_fiducia_memory.sql       epistemic schema: memories, embeddings, claims ledger, edges, recall log, RLS
 sql/
-  fiducia_memory.sql   canonical schema: memories, embeddings, claims, edges, recall log, RLS
+  fiducia_memory.sql   canonical epistemic schema (also embedded by db.rs for --migrate parity)
+  recall.sql           durable hybrid-recall query (candidate generation)
 ```
 
-The **library core is pure and deterministic** — the claim ledger and the recall
-fusion are plain functions of their inputs, so the full lifecycle and ranking
-are unit-tested without a database (`cargo test`, 12 tests, all green offline).
+> **`durable::model::Claim` vs `domain::Claim`.** These are deliberately kept
+> distinct. A `durable::model::Claim` is a provenance-bearing **fact row** in
+> `memory_claims` (subject/predicate/object + embedding + temporal supersession).
+> A `domain::Claim` is a **contestable ledger assertion** moving through
+> assert→support→contest→resolve. They model different things and both survive
+> the merge under clear names (see the `// RECONCILE:` notes in `fusion.rs` and
+> `durable/model.rs`).
+
+The **library core is pure and deterministic** — the claim ledger, the recall
+fusion, and the durable→fusion bridge are plain functions of their inputs, so
+the full lifecycle, ranking, and candidate projection are unit-tested without a
+database (`cargo test`, 15 tests, all green offline).
 
 ### Memory types
 
