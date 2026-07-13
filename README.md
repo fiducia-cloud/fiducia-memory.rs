@@ -136,26 +136,46 @@ policies** on `memories` / `claims` / `memory_edges` are the backstop.
 ## Running it
 
 ```bash
-# 1. apply the schema (idempotent; needs pgvector)
+# The service applies ALL migrations on boot (sqlx::migrate! over migrations/).
+# To apply the schema and exit (idempotent; needs pgvector):
 DATABASE_URL=postgres://user:pass@host/db  cargo run -- --migrate
 
-# 2. serve
+# Serve (also migrates on boot):
 DATABASE_URL=postgres://user:pass@host/db  cargo run
 # listens on 127.0.0.1:8100 (override with FIDUCIA_MEMORY_BIND)
 ```
 
 ### HTTP API
 
-| Method + path | Purpose |
-|---|---|
-| `GET  /healthz` | liveness |
-| `GET  /readyz` | readiness (pings Postgres) |
-| `POST /v1/memories` | store a memory (trust derived from provenance) |
-| `POST /v1/claims/assert` | assert / re-assert a claim (a hypothesis, not truth) |
-| `POST /v1/claims/support` | independently support a live claim |
-| `POST /v1/claims/contest` | contest a live claim (moves it to `contested`) |
-| `POST /v1/claims/resolve` | **authorized** accept/reject — the only path to authoritative truth |
-| `GET  /v1/claims/consensus` | the authoritative value, or `null` if not yet accepted |
+One router, mounted over a single shared `PgPool`, exposes **both** endpoint
+sets:
+
+| Method + path | Layer | Purpose |
+|---|---|---|
+| `GET  /healthz` | — | liveness |
+| `GET  /readyz` | — | readiness (pings Postgres) |
+| `POST /v1/claims` | durable | append an immutable fact + its 1536-d embedding to `memory_claims` |
+| `POST /v1/claims/{id}/supersede` | durable | atomically close an active fact and append its replacement |
+| `POST /v1/recall` | durable | raw hybrid semantic + lexical recall (`sql/recall.sql`) |
+| `POST /v1/memories` | epistemic | store a memory (trust derived from provenance) |
+| `POST /v1/recall/fused` | seam | durable SQL recall → epistemic fusion (filtered, ranked, explained pack) |
+| `POST /v1/claims/assert` | epistemic | assert / re-assert a ledger claim (a hypothesis, not truth) |
+| `POST /v1/claims/support` | epistemic | independently support a live claim |
+| `POST /v1/claims/contest` | epistemic | contest a live claim (moves it to `contested`) |
+| `POST /v1/claims/resolve` | epistemic | **authorized** accept/reject — the only path to authoritative truth |
+| `GET  /v1/claims/consensus` | epistemic | the authoritative value, or `null` if not yet accepted |
+
+> Note: `POST /v1/claims` (durable append of a fact) and
+> `POST /v1/claims/assert` (open a contestable ledger claim) are distinct
+> operations on the two different `Claim` models — see the two-layers note above.
+
+**`/v1/recall/fused`** is the merge in action: the durable store runs the
+index-accelerated candidate generation (`sql/recall.sql`: tenant + temporal
+filter, `ts_rank_cd` lexical, HNSW cosine), and those hits are projected into
+`recall::Candidate`s that the epistemic fusion then hard-filters
+(authorization/validity), ranks (lexical+semantic+trust+freshness), down-ranks
+if contradicted, dedupes, and packs to a token budget — each returned memory
+carrying its score breakdown and a human-readable reason.
 
 ```bash
 # assert → not authoritative yet
