@@ -94,18 +94,39 @@ impl MemoryStore {
         embedding: Vector,
     ) -> Result<Vec<RecallHit>, StoreError> {
         let lexical_weight = 1.0 - request.semantic_weight;
-        Ok(
-            sqlx::query_as::<_, RecallHit>(include_str!("../../sql/recall.sql"))
-                .bind(request.tenant_id)
-                .bind(&request.query)
-                .bind(embedding)
-                .bind(request.semantic_weight)
-                .bind(lexical_weight)
-                .bind(request.limit)
-                .fetch_all(&self.pool)
-                .await?,
-        )
+        // Read path also runs inside a tenant-scoped transaction so the FORCEd
+        // RLS policy on `memory_claims` filters candidate rows to the tenant on
+        // the same connection the query runs on. (A bare `&self.pool` read could
+        // land on a different connection than any GUC was set on, so RLS would
+        // return zero rows — the GUC MUST be bound on this very transaction.)
+        let mut tx = self.pool.begin().await?;
+        bind_tenant(&mut tx, request.tenant_id).await?;
+        let hits = sqlx::query_as::<_, RecallHit>(include_str!("../../sql/recall.sql"))
+            .bind(request.tenant_id)
+            .bind(&request.query)
+            .bind(embedding)
+            .bind(request.semantic_weight)
+            .bind(lexical_weight)
+            .bind(request.limit)
+            .fetch_all(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(hits)
     }
+}
+
+/// Bind the per-request `fiducia.tenant_id` GUC on `tx` with `SET LOCAL`
+/// semantics (`set_config(..., true)`), so the FORCEd RLS policies on
+/// `memory_claims` filter this transaction's statements to `tenant`.
+async fn bind_tenant(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("select set_config('fiducia.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 async fn insert_claim(
