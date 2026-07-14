@@ -56,9 +56,13 @@ pub async fn append_claim(
 
 pub async fn supersede_claim(
     State(store): State<MemoryStore>,
+    auth: AuthTenant,
     Path(claim_id): Path<Uuid>,
     Json(input): Json<SupersedeClaim>,
 ) -> Response {
+    if let Err(resp) = resolve_tenant(auth, input.tenant_id) {
+        return resp;
+    }
     if input.replacement.tenant_id != input.tenant_id {
         return bad_request("replacement tenant_id must match tenant_id");
     }
