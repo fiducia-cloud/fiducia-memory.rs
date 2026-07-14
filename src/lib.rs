@@ -36,6 +36,7 @@
 //! similarity can rank candidates but never include an unauthorized or invalid
 //! one.
 
+pub mod auth;
 pub mod claims;
 pub mod db;
 pub mod domain;
