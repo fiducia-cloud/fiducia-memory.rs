@@ -309,8 +309,12 @@ struct FusedRecallBody {
 /// memories, dedupes, and returns an explained, token-bounded pack.
 async fn fused_recall(
     State(state): State<AppState>,
+    auth: AuthTenant,
     Json(body): Json<FusedRecallBody>,
 ) -> Response {
+    if let Err(resp) = resolve_tenant(auth, body.durable.tenant_id) {
+        return resp;
+    }
     let embedding = match body.durable.validate() {
         Ok(v) => v,
         Err(detail) => {
