@@ -32,6 +32,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use fiducia_memory::{
+    auth::{require_internal_auth, resolve_tenant, AuthConfig, AuthTenant},
     claims::{Assertion, ClaimError, ClaimLedger},
     domain::{Memory, MemoryType, Provenance},
     durable::{self, store::MemoryStore},
@@ -107,15 +108,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     durable.ping().await?;
+
+    // Internal-hop authentication (fail-closed). Warn loudly if the operator has
+    // neither configured a secret nor opted into insecure dev — every /v1 request
+    // will be rejected until one is set.
+    let auth = AuthConfig::from_env();
+    if !auth.is_configured() {
+        tracing::warn!(
+            "no FIDUCIA_INTERNAL_SECRET and FIDUCIA_ALLOW_INSECURE_INTERNAL != 1: \
+             all /v1 requests will be rejected (fail-closed). Set the secret in production \
+             or FIDUCIA_ALLOW_INSECURE_INTERNAL=1 for local dev."
+        );
+    } else if !auth.enforced() {
+        tracing::warn!(
+            "FIDUCIA_ALLOW_INSECURE_INTERNAL=1: serving /v1 WITHOUT authentication or \
+             tenant scoping — local dev only, never production."
+        );
+    }
+
     let state = AppState {
         pg,
         durable,
         ledger: Arc::new(Mutex::new(ClaimLedger::new())),
     };
 
-    let app = Router::new()
-        .route("/healthz", get(|| async { "ok" }))
-        .route("/readyz", get(readyz))
+    // All /v1 routes sit behind the internal-auth middleware; health probes stay
+    // public.
+    let protected = Router::new()
         // ---- durable storage floor (codex) ----
         .route("/v1/claims", post(durable::api::append_claim))
         .route(
@@ -131,6 +150,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/claims/contest", post(contest_claim))
         .route("/v1/claims/resolve", post(resolve_claim))
         .route("/v1/claims/consensus", get(consensus))
+        .route_layer(axum::middleware::from_fn_with_state(
+            auth.clone(),
+            require_internal_auth,
+        ));
+
+    let app = Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/readyz", get(readyz))
+        .merge(protected)
         .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
@@ -219,8 +247,12 @@ struct CreateMemory {
 
 async fn create_memory(
     State(state): State<AppState>,
+    auth: AuthTenant,
     Json(body): Json<CreateMemory>,
 ) -> Result<Response, ApiError> {
+    if let Err(resp) = resolve_tenant(auth, body.tenant_id) {
+        return Ok(resp);
+    }
     let trust = body
         .trust_score
         .unwrap_or_else(|| trust_from(&body.provenance, 0, 0))
@@ -277,8 +309,12 @@ struct FusedRecallBody {
 /// memories, dedupes, and returns an explained, token-bounded pack.
 async fn fused_recall(
     State(state): State<AppState>,
+    auth: AuthTenant,
     Json(body): Json<FusedRecallBody>,
 ) -> Response {
+    if let Err(resp) = resolve_tenant(auth, body.durable.tenant_id) {
+        return resp;
+    }
     let embedding = match body.durable.validate() {
         Ok(v) => v,
         Err(detail) => {
@@ -338,8 +374,12 @@ struct AssertBody {
 
 async fn assert_claim(
     State(state): State<AppState>,
+    auth: AuthTenant,
     Json(body): Json<AssertBody>,
 ) -> Result<Response, ApiError> {
+    if let Err(resp) = resolve_tenant(auth, body.tenant_id) {
+        return Ok(resp);
+    }
     let claim = {
         let mut ledger = state.ledger.lock().expect("ledger lock");
         ledger
@@ -372,8 +412,12 @@ struct SupportBody {
 
 async fn support_claim(
     State(state): State<AppState>,
+    auth: AuthTenant,
     Json(body): Json<SupportBody>,
 ) -> Result<Response, ApiError> {
+    if let Err(resp) = resolve_tenant(auth, body.tenant_id) {
+        return Ok(resp);
+    }
     let claim = {
         let mut ledger = state.ledger.lock().expect("ledger lock");
         ledger
@@ -405,8 +449,12 @@ struct ContestBody {
 
 async fn contest_claim(
     State(state): State<AppState>,
+    auth: AuthTenant,
     Json(body): Json<ContestBody>,
 ) -> Result<Response, ApiError> {
+    if let Err(resp) = resolve_tenant(auth, body.tenant_id) {
+        return Ok(resp);
+    }
     let claim = {
         let mut ledger = state.ledger.lock().expect("ledger lock");
         ledger
@@ -438,8 +486,12 @@ struct ResolveBody {
 
 async fn resolve_claim(
     State(state): State<AppState>,
+    auth: AuthTenant,
     Json(body): Json<ResolveBody>,
 ) -> Result<Response, ApiError> {
+    if let Err(resp) = resolve_tenant(auth, body.tenant_id) {
+        return Ok(resp);
+    }
     let claim = {
         let mut ledger = state.ledger.lock().expect("ledger lock");
         ledger
@@ -472,8 +524,12 @@ struct ConsensusParams {
 /// what has actually been resolved this session.
 async fn consensus(
     State(state): State<AppState>,
+    auth: AuthTenant,
     Query(params): Query<ConsensusParams>,
 ) -> Response {
+    if let Err(resp) = resolve_tenant(auth, params.tenant_id) {
+        return resp;
+    }
     let value = {
         let ledger = state.ledger.lock().expect("ledger lock");
         ledger

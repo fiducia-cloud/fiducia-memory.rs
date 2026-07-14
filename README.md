@@ -130,13 +130,36 @@ The only requirement is the **pgvector** extension (`create extension vector`) �
 the schema does this for you. Queries use runtime `sqlx` binding, so the crate
 builds with no database reachable at compile time.
 
-Tenant isolation is enforced twice. Every query carries an explicit tenant
-predicate, and every tenant-scoped database operation runs in a transaction that
-binds `fiducia.tenant_id` with `SET LOCAL` semantics on that same pooled
-connection. The schema enables and **forces** row-level security on the durable
-fact ledger, memories, embeddings, contestable claims, graph edges, and recall
-audit log. A missing tenant binding therefore sees or writes no tenant rows,
-including when the service connects as the table owner.
+## Authentication & tenancy
+
+`fiducia-memory` sits behind the platform edge / load-balancer exactly like
+`fiducia-node`, and every `/v1` route is guarded by the same internal-hop
+contract (`/healthz` and `/readyz` stay public for probes):
+
+- **`x-fiducia-internal-auth: <FIDUCIA_INTERNAL_SECRET>`** authenticates the
+  caller as an internal service. It is constant-time compared and **fail-CLOSED**:
+  with no secret configured the service refuses every `/v1` request unless the
+  operator explicitly opts into insecure local dev via
+  `FIDUCIA_ALLOW_INSECURE_INTERNAL=1`.
+- **`x-fiducia-org-id: <uuid>`** is the **authenticated tenant** (LB-injected).
+  It is authoritative: a request whose body/query `tenant_id` disagrees is
+  rejected `403`, so a caller cannot read or write another tenant's data by
+  naming it in the payload. `POST /v1/claims/resolve` — the only path to
+  authoritative truth — is behind this guard like every other write.
+
+Below that gate, tenant isolation is defended twice more in the database. Every
+query carries an explicit tenant predicate, and every tenant-scoped operation
+runs in a transaction that binds `fiducia.tenant_id` with `SET LOCAL` semantics
+on that same pooled connection. The schema enables and **forces** row-level
+security on the durable fact ledger, memories, embeddings, contestable claims,
+graph edges, and recall audit log — so a missing tenant binding sees or writes no
+rows, even when the service connects as the table owner.
+
+> Per-actor identity (operator-vs-service, *who* may resolve a claim) is a
+> deliberate platform-wide follow-up, not yet enforced here: any holder of the
+> internal secret scoped to org X can perform any operation on org X. This
+> service establishes the same authentication + tenant-scoping boundary the rest
+> of the platform already has; finer-grained authorization is tracked separately.
 
 ## Running it
 
@@ -179,7 +202,7 @@ sets:
 | `POST /v1/claims/assert` | epistemic | assert / re-assert a ledger claim (a hypothesis, not truth) |
 | `POST /v1/claims/support` | epistemic | independently support a live claim |
 | `POST /v1/claims/contest` | epistemic | contest a live claim (moves it to `contested`) |
-| `POST /v1/claims/resolve` | epistemic | **authorized** accept/reject — the only path to authoritative truth |
+| `POST /v1/claims/resolve` | epistemic | accept/reject (internal-auth + tenant-scoped) — the only path to authoritative truth |
 | `GET  /v1/claims/consensus` | epistemic | the authoritative value, or `null` if not yet accepted |
 
 > Note: `POST /v1/claims` (durable append of a fact) and
@@ -194,18 +217,24 @@ filter, `ts_rank_cd` lexical, HNSW cosine), and those hits are projected into
 if contradicted, dedupes, and packs to a token budget — each returned memory
 carrying its score breakdown and a human-readable reason.
 
+Every `/v1` call carries the internal-auth secret and the org header (the
+authenticated tenant); the body `tenant_id` must match `x-fiducia-org-id`. In
+local dev with `FIDUCIA_ALLOW_INSECURE_INTERNAL=1` the two headers may be omitted.
+
 ```bash
+AUTH='-H x-fiducia-internal-auth:$FIDUCIA_INTERNAL_SECRET -H x-fiducia-org-id:00000000-0000-0000-0000-000000000001'
+
 # assert → not authoritative yet
-curl -s localhost:8100/v1/claims/assert -H 'content-type: application/json' -d '{
+curl -s $AUTH localhost:8100/v1/claims/assert -H 'content-type: application/json' -d '{
   "tenant_id":"00000000-0000-0000-0000-000000000001",
   "subject":"customer:219","predicate":"refund_eligible","value":true,
   "confidence":0.9,"author":"billing-agent","evidence":["ticket:88"]}'
 
 # consensus is null until an authorized principal resolves it
-curl -s 'localhost:8100/v1/claims/consensus?tenant_id=00000000-0000-0000-0000-000000000001&subject=customer:219&predicate=refund_eligible'
+curl -s $AUTH 'localhost:8100/v1/claims/consensus?tenant_id=00000000-0000-0000-0000-000000000001&subject=customer:219&predicate=refund_eligible'
 # → {"authoritative_value": null, ...}
 
-curl -s localhost:8100/v1/claims/resolve -H 'content-type: application/json' -d '{
+curl -s $AUTH localhost:8100/v1/claims/resolve -H 'content-type: application/json' -d '{
   "tenant_id":"00000000-0000-0000-0000-000000000001",
   "subject":"customer:219","predicate":"refund_eligible",
   "accepted":true,"resolver":"supervisor:alex"}'
@@ -219,7 +248,9 @@ The service is configured entirely through environment variables:
 | Variable | Required | Secret | Description |
 |---|---|---|---|
 | `DATABASE_URL` | **yes** | **yes** | Postgres connection URL (`postgres://user:pass@host/db`). **Carries database credentials** — treat as a secret: never log it, keep it out of shell history and CI logs, inject it from a secret store. Points at the customer's own Postgres or the Fiducia-hosted default; needs the `pgvector` extension. |
-| `FIDUCIA_MEMORY_BIND` | no | no | Listen address for the HTTP service. Defaults to `127.0.0.1:8100`. |
+| `FIDUCIA_INTERNAL_SECRET` | **yes** (prod) | **yes** | Shared internal-hop secret required in `x-fiducia-internal-auth` on every `/v1` request. Unset ⇒ **fail-closed** (all `/v1` rejected) unless `FIDUCIA_ALLOW_INSECURE_INTERNAL=1`. |
+| `FIDUCIA_ALLOW_INSECURE_INTERNAL` | no | no | Set to `1` to serve `/v1` with **no** authentication or tenant scoping. **Local dev only** — never production. |
+| `FIDUCIA_MEMORY_BIND` | no | no | Listen address. Defaults to `127.0.0.1:8100`. Binding `0.0.0.0` is only safe with `FIDUCIA_INTERNAL_SECRET` set (auth is then enforced). |
 | `RUST_LOG` / `fiducia_memory=…` | no | no | Standard `tracing-subscriber` env-filter for log levels (defaults to `fiducia_memory=info,tower_http=info`). |
 
 ### CLI flags → env (flags-2-env)
@@ -252,11 +283,16 @@ Dependabot tracks Cargo, actions, and Docker inputs weekly.
 - **All SQL is parameterized.** Every query uses `sqlx` bind parameters
   (`query`/`query_as` with `.bind(...)`); no SQL is built by string
   concatenation or `format!`. Embeddings are passed as bound `vector` parameters.
-- **Tenant isolation is defense in depth.** Queries retain explicit tenant
-  predicates (the claims ledger also uses its full namespace key), while a
-  transaction-local `fiducia.tenant_id` binding activates FORCEd RLS on every
-  durable tenant table. Pool connections cannot retain tenant state across
-  requests.
+- **Authenticated, tenant-scoped `/v1`.** Every `/v1` route requires the
+  internal-auth secret (fail-closed) and derives the tenant from the
+  LB-injected `x-fiducia-org-id`, rejecting any payload `tenant_id` that
+  disagrees. The middleware is exercised end-to-end in
+  [`tests/auth_middleware.rs`](tests/auth_middleware.rs).
+- **Tenant isolation is defense in depth.** Below the auth gate, queries retain
+  explicit tenant predicates (the claims ledger also uses its full namespace
+  key), while a transaction-local `fiducia.tenant_id` binding activates FORCEd
+  RLS on every durable tenant table. Pool connections cannot retain tenant state
+  across requests.
 - **Request hardening:** a 2 MiB request-body limit, a 10 s per-request timeout,
   and a 5 s pool-acquire timeout are applied at the service layer; recall
   embeddings and page sizes are range-validated before they reach the database.

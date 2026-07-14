@@ -4,6 +4,7 @@
 //! (atomic supersede), `POST /v1/recall` (raw hybrid recall). These extract the
 //! durable [`MemoryStore`] from the unified application state via `FromRef`.
 
+use crate::auth::{resolve_tenant, AuthTenant};
 use crate::durable::{
     model::{AppendClaim, RecallRequest, SupersedeClaim},
     store::{MemoryStore, StoreError},
@@ -37,8 +38,12 @@ pub async fn ready(State(store): State<MemoryStore>) -> Response {
 
 pub async fn append_claim(
     State(store): State<MemoryStore>,
+    auth: AuthTenant,
     Json(input): Json<AppendClaim>,
 ) -> Response {
+    if let Err(resp) = resolve_tenant(auth, input.tenant_id) {
+        return resp;
+    }
     let embedding = match input.validate() {
         Ok(value) => value,
         Err(error) => return bad_request(error),
@@ -51,9 +56,13 @@ pub async fn append_claim(
 
 pub async fn supersede_claim(
     State(store): State<MemoryStore>,
+    auth: AuthTenant,
     Path(claim_id): Path<Uuid>,
     Json(input): Json<SupersedeClaim>,
 ) -> Response {
+    if let Err(resp) = resolve_tenant(auth, input.tenant_id) {
+        return resp;
+    }
     if input.replacement.tenant_id != input.tenant_id {
         return bad_request("replacement tenant_id must match tenant_id");
     }
@@ -77,8 +86,12 @@ pub async fn supersede_claim(
 
 pub async fn recall(
     State(store): State<MemoryStore>,
+    auth: AuthTenant,
     Json(input): Json<RecallRequest>,
 ) -> Response {
+    if let Err(resp) = resolve_tenant(auth, input.tenant_id) {
+        return resp;
+    }
     let embedding = match input.validate() {
         Ok(value) => value,
         Err(error) => return bad_request(error),
