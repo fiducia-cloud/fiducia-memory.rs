@@ -217,18 +217,24 @@ filter, `ts_rank_cd` lexical, HNSW cosine), and those hits are projected into
 if contradicted, dedupes, and packs to a token budget — each returned memory
 carrying its score breakdown and a human-readable reason.
 
+Every `/v1` call carries the internal-auth secret and the org header (the
+authenticated tenant); the body `tenant_id` must match `x-fiducia-org-id`. In
+local dev with `FIDUCIA_ALLOW_INSECURE_INTERNAL=1` the two headers may be omitted.
+
 ```bash
+AUTH='-H x-fiducia-internal-auth:$FIDUCIA_INTERNAL_SECRET -H x-fiducia-org-id:00000000-0000-0000-0000-000000000001'
+
 # assert → not authoritative yet
-curl -s localhost:8100/v1/claims/assert -H 'content-type: application/json' -d '{
+curl -s $AUTH localhost:8100/v1/claims/assert -H 'content-type: application/json' -d '{
   "tenant_id":"00000000-0000-0000-0000-000000000001",
   "subject":"customer:219","predicate":"refund_eligible","value":true,
   "confidence":0.9,"author":"billing-agent","evidence":["ticket:88"]}'
 
 # consensus is null until an authorized principal resolves it
-curl -s 'localhost:8100/v1/claims/consensus?tenant_id=00000000-0000-0000-0000-000000000001&subject=customer:219&predicate=refund_eligible'
+curl -s $AUTH 'localhost:8100/v1/claims/consensus?tenant_id=00000000-0000-0000-0000-000000000001&subject=customer:219&predicate=refund_eligible'
 # → {"authoritative_value": null, ...}
 
-curl -s localhost:8100/v1/claims/resolve -H 'content-type: application/json' -d '{
+curl -s $AUTH localhost:8100/v1/claims/resolve -H 'content-type: application/json' -d '{
   "tenant_id":"00000000-0000-0000-0000-000000000001",
   "subject":"customer:219","predicate":"refund_eligible",
   "accepted":true,"resolver":"supervisor:alex"}'
