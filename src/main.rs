@@ -449,8 +449,12 @@ struct ContestBody {
 
 async fn contest_claim(
     State(state): State<AppState>,
+    auth: AuthTenant,
     Json(body): Json<ContestBody>,
 ) -> Result<Response, ApiError> {
+    if let Err(resp) = resolve_tenant(auth, body.tenant_id) {
+        return Ok(resp);
+    }
     let claim = {
         let mut ledger = state.ledger.lock().expect("ledger lock");
         ledger
