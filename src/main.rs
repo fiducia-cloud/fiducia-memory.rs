@@ -524,8 +524,12 @@ struct ConsensusParams {
 /// what has actually been resolved this session.
 async fn consensus(
     State(state): State<AppState>,
+    auth: AuthTenant,
     Query(params): Query<ConsensusParams>,
 ) -> Response {
+    if let Err(resp) = resolve_tenant(auth, params.tenant_id) {
+        return resp;
+    }
     let value = {
         let ledger = state.ledger.lock().expect("ledger lock");
         ledger
