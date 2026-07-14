@@ -57,9 +57,9 @@ impl AuthConfig {
         Self { secret, allow_insecure }
     }
 
-    #[cfg(test)]
-    fn new(secret: Option<&str>, allow_insecure: bool) -> Self {
-        Self { secret: secret.map(str::to_owned), allow_insecure }
+    /// Construct an explicit policy (tests, or callers wiring config themselves).
+    pub fn new(secret: Option<String>, allow_insecure: bool) -> Self {
+        Self { secret: secret.filter(|s| !s.is_empty()), allow_insecure }
     }
 
     /// True when a secret is configured, i.e. service authentication is enforced
