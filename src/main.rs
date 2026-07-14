@@ -247,8 +247,12 @@ struct CreateMemory {
 
 async fn create_memory(
     State(state): State<AppState>,
+    auth: AuthTenant,
     Json(body): Json<CreateMemory>,
 ) -> Result<Response, ApiError> {
+    if let Err(resp) = resolve_tenant(auth, body.tenant_id) {
+        return Ok(resp);
+    }
     let trust = body
         .trust_score
         .unwrap_or_else(|| trust_from(&body.provenance, 0, 0))
