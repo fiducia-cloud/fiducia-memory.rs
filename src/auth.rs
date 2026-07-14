@@ -210,10 +210,12 @@ mod tests {
 
     #[test]
     fn config_flags() {
-        assert!(AuthConfig::new(Some("x"), false).enforced());
-        assert!(AuthConfig::new(Some("x"), false).is_configured());
+        assert!(AuthConfig::new(Some("x".into()), false).enforced());
+        assert!(AuthConfig::new(Some("x".into()), false).is_configured());
         assert!(!AuthConfig::new(None, false).enforced());
         assert!(!AuthConfig::new(None, false).is_configured());
         assert!(AuthConfig::new(None, true).is_configured());
+        // An empty secret is treated as unset.
+        assert!(!AuthConfig::new(Some(String::new()), false).enforced());
     }
 }
