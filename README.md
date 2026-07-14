@@ -277,11 +277,16 @@ Dependabot tracks Cargo, actions, and Docker inputs weekly.
 - **All SQL is parameterized.** Every query uses `sqlx` bind parameters
   (`query`/`query_as` with `.bind(...)`); no SQL is built by string
   concatenation or `format!`. Embeddings are passed as bound `vector` parameters.
-- **Tenant isolation is defense in depth.** Queries retain explicit tenant
-  predicates (the claims ledger also uses its full namespace key), while a
-  transaction-local `fiducia.tenant_id` binding activates FORCEd RLS on every
-  durable tenant table. Pool connections cannot retain tenant state across
-  requests.
+- **Authenticated, tenant-scoped `/v1`.** Every `/v1` route requires the
+  internal-auth secret (fail-closed) and derives the tenant from the
+  LB-injected `x-fiducia-org-id`, rejecting any payload `tenant_id` that
+  disagrees. The middleware is exercised end-to-end in
+  [`tests/auth_middleware.rs`](tests/auth_middleware.rs).
+- **Tenant isolation is defense in depth.** Below the auth gate, queries retain
+  explicit tenant predicates (the claims ledger also uses its full namespace
+  key), while a transaction-local `fiducia.tenant_id` binding activates FORCEd
+  RLS on every durable tenant table. Pool connections cannot retain tenant state
+  across requests.
 - **Request hardening:** a 2 MiB request-body limit, a 10 s per-request timeout,
   and a 5 s pool-acquire timeout are applied at the service layer; recall
   embeddings and page sizes are range-validated before they reach the database.
