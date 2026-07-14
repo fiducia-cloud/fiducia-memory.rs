@@ -108,15 +108,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     durable.ping().await?;
+
+    // Internal-hop authentication (fail-closed). Warn loudly if the operator has
+    // neither configured a secret nor opted into insecure dev — every /v1 request
+    // will be rejected until one is set.
+    let auth = AuthConfig::from_env();
+    if !auth.is_configured() {
+        tracing::warn!(
+            "no FIDUCIA_INTERNAL_SECRET and FIDUCIA_ALLOW_INSECURE_INTERNAL != 1: \
+             all /v1 requests will be rejected (fail-closed). Set the secret in production \
+             or FIDUCIA_ALLOW_INSECURE_INTERNAL=1 for local dev."
+        );
+    } else if !auth.enforced() {
+        tracing::warn!(
+            "FIDUCIA_ALLOW_INSECURE_INTERNAL=1: serving /v1 WITHOUT authentication or \
+             tenant scoping — local dev only, never production."
+        );
+    }
+
     let state = AppState {
         pg,
         durable,
         ledger: Arc::new(Mutex::new(ClaimLedger::new())),
     };
 
-    let app = Router::new()
-        .route("/healthz", get(|| async { "ok" }))
-        .route("/readyz", get(readyz))
+    // All /v1 routes sit behind the internal-auth middleware; health probes stay
+    // public.
+    let protected = Router::new()
         // ---- durable storage floor (codex) ----
         .route("/v1/claims", post(durable::api::append_claim))
         .route(
@@ -132,6 +150,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/claims/contest", post(contest_claim))
         .route("/v1/claims/resolve", post(resolve_claim))
         .route("/v1/claims/consensus", get(consensus))
+        .route_layer(axum::middleware::from_fn_with_state(
+            auth.clone(),
+            require_internal_auth,
+        ));
+
+    let app = Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/readyz", get(readyz))
+        .merge(protected)
         .layer(RequestBodyLimitLayer::new(2 * 1024 * 1024))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
