@@ -38,8 +38,12 @@ pub async fn ready(State(store): State<MemoryStore>) -> Response {
 
 pub async fn append_claim(
     State(store): State<MemoryStore>,
+    auth: AuthTenant,
     Json(input): Json<AppendClaim>,
 ) -> Response {
+    if let Err(resp) = resolve_tenant(auth, input.tenant_id) {
+        return resp;
+    }
     let embedding = match input.validate() {
         Ok(value) => value,
         Err(error) => return bad_request(error),
