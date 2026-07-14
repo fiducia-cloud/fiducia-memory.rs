@@ -4,6 +4,7 @@
 //! (atomic supersede), `POST /v1/recall` (raw hybrid recall). These extract the
 //! durable [`MemoryStore`] from the unified application state via `FromRef`.
 
+use crate::auth::{resolve_tenant, AuthTenant};
 use crate::durable::{
     model::{AppendClaim, RecallRequest, SupersedeClaim},
     store::{MemoryStore, StoreError},
