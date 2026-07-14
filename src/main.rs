@@ -486,8 +486,12 @@ struct ResolveBody {
 
 async fn resolve_claim(
     State(state): State<AppState>,
+    auth: AuthTenant,
     Json(body): Json<ResolveBody>,
 ) -> Result<Response, ApiError> {
+    if let Err(resp) = resolve_tenant(auth, body.tenant_id) {
+        return Ok(resp);
+    }
     let claim = {
         let mut ledger = state.ledger.lock().expect("ledger lock");
         ledger
