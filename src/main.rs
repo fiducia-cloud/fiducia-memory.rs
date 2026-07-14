@@ -32,7 +32,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use fiducia_memory::{
-    auth::{self, require_internal_auth, resolve_tenant, AuthConfig, AuthTenant},
+    auth::{require_internal_auth, resolve_tenant, AuthConfig, AuthTenant},
     claims::{Assertion, ClaimError, ClaimLedger},
     domain::{Memory, MemoryType, Provenance},
     durable::{self, store::MemoryStore},
