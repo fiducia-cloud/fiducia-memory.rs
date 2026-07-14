@@ -202,7 +202,7 @@ sets:
 | `POST /v1/claims/assert` | epistemic | assert / re-assert a ledger claim (a hypothesis, not truth) |
 | `POST /v1/claims/support` | epistemic | independently support a live claim |
 | `POST /v1/claims/contest` | epistemic | contest a live claim (moves it to `contested`) |
-| `POST /v1/claims/resolve` | epistemic | **authorized** accept/reject — the only path to authoritative truth |
+| `POST /v1/claims/resolve` | epistemic | accept/reject (internal-auth + tenant-scoped) — the only path to authoritative truth |
 | `GET  /v1/claims/consensus` | epistemic | the authoritative value, or `null` if not yet accepted |
 
 > Note: `POST /v1/claims` (durable append of a fact) and
