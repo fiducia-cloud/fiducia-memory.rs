@@ -242,7 +242,9 @@ The service is configured entirely through environment variables:
 | Variable | Required | Secret | Description |
 |---|---|---|---|
 | `DATABASE_URL` | **yes** | **yes** | Postgres connection URL (`postgres://user:pass@host/db`). **Carries database credentials** — treat as a secret: never log it, keep it out of shell history and CI logs, inject it from a secret store. Points at the customer's own Postgres or the Fiducia-hosted default; needs the `pgvector` extension. |
-| `FIDUCIA_MEMORY_BIND` | no | no | Listen address for the HTTP service. Defaults to `127.0.0.1:8100`. |
+| `FIDUCIA_INTERNAL_SECRET` | **yes** (prod) | **yes** | Shared internal-hop secret required in `x-fiducia-internal-auth` on every `/v1` request. Unset ⇒ **fail-closed** (all `/v1` rejected) unless `FIDUCIA_ALLOW_INSECURE_INTERNAL=1`. |
+| `FIDUCIA_ALLOW_INSECURE_INTERNAL` | no | no | Set to `1` to serve `/v1` with **no** authentication or tenant scoping. **Local dev only** — never production. |
+| `FIDUCIA_MEMORY_BIND` | no | no | Listen address. Defaults to `127.0.0.1:8100`. Binding `0.0.0.0` is only safe with `FIDUCIA_INTERNAL_SECRET` set (auth is then enforced). |
 | `RUST_LOG` / `fiducia_memory=…` | no | no | Standard `tracing-subscriber` env-filter for log levels (defaults to `fiducia_memory=info,tower_http=info`). |
 
 ### CLI flags → env (flags-2-env)
