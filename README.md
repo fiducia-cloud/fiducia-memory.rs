@@ -130,13 +130,36 @@ The only requirement is the **pgvector** extension (`create extension vector`) �
 the schema does this for you. Queries use runtime `sqlx` binding, so the crate
 builds with no database reachable at compile time.
 
-Tenant isolation is enforced twice. Every query carries an explicit tenant
-predicate, and every tenant-scoped database operation runs in a transaction that
-binds `fiducia.tenant_id` with `SET LOCAL` semantics on that same pooled
-connection. The schema enables and **forces** row-level security on the durable
-fact ledger, memories, embeddings, contestable claims, graph edges, and recall
-audit log. A missing tenant binding therefore sees or writes no tenant rows,
-including when the service connects as the table owner.
+## Authentication & tenancy
+
+`fiducia-memory` sits behind the platform edge / load-balancer exactly like
+`fiducia-node`, and every `/v1` route is guarded by the same internal-hop
+contract (`/healthz` and `/readyz` stay public for probes):
+
+- **`x-fiducia-internal-auth: <FIDUCIA_INTERNAL_SECRET>`** authenticates the
+  caller as an internal service. It is constant-time compared and **fail-CLOSED**:
+  with no secret configured the service refuses every `/v1` request unless the
+  operator explicitly opts into insecure local dev via
+  `FIDUCIA_ALLOW_INSECURE_INTERNAL=1`.
+- **`x-fiducia-org-id: <uuid>`** is the **authenticated tenant** (LB-injected).
+  It is authoritative: a request whose body/query `tenant_id` disagrees is
+  rejected `403`, so a caller cannot read or write another tenant's data by
+  naming it in the payload. `POST /v1/claims/resolve` — the only path to
+  authoritative truth — is behind this guard like every other write.
+
+Below that gate, tenant isolation is defended twice more in the database. Every
+query carries an explicit tenant predicate, and every tenant-scoped operation
+runs in a transaction that binds `fiducia.tenant_id` with `SET LOCAL` semantics
+on that same pooled connection. The schema enables and **forces** row-level
+security on the durable fact ledger, memories, embeddings, contestable claims,
+graph edges, and recall audit log — so a missing tenant binding sees or writes no
+rows, even when the service connects as the table owner.
+
+> Per-actor identity (operator-vs-service, *who* may resolve a claim) is a
+> deliberate platform-wide follow-up, not yet enforced here: any holder of the
+> internal secret scoped to org X can perform any operation on org X. This
+> service establishes the same authentication + tenant-scoping boundary the rest
+> of the platform already has; finer-grained authorization is tracked separately.
 
 ## Running it
 
