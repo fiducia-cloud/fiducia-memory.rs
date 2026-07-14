@@ -197,7 +197,7 @@ mod tests {
         let org = Uuid::new_v4();
         let other = Uuid::new_v4();
         // Authenticated org matches the body: allowed.
-        assert_eq!(resolve_tenant(AuthTenant(Some(org)), org), Ok(org));
+        assert_eq!(resolve_tenant(AuthTenant(Some(org)), org).ok(), Some(org));
         // Authenticated org differs from the body tenant: rejected.
         assert!(resolve_tenant(AuthTenant(Some(org)), other).is_err());
     }
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn insecure_mode_without_org_falls_back_to_body_tenant() {
         let body = Uuid::new_v4();
-        assert_eq!(resolve_tenant(AuthTenant(None), body), Ok(body));
+        assert_eq!(resolve_tenant(AuthTenant(None), body).ok(), Some(body));
     }
 
     #[test]
