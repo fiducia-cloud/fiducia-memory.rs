@@ -54,12 +54,18 @@ impl AuthConfig {
             .ok()
             .filter(|s| !s.is_empty());
         let allow_insecure = std::env::var("FIDUCIA_ALLOW_INSECURE_INTERNAL").as_deref() == Ok("1");
-        Self { secret, allow_insecure }
+        Self {
+            secret,
+            allow_insecure,
+        }
     }
 
     /// Construct an explicit policy (tests, or callers wiring config themselves).
     pub fn new(secret: Option<String>, allow_insecure: bool) -> Self {
-        Self { secret: secret.filter(|s| !s.is_empty()), allow_insecure }
+        Self {
+            secret: secret.filter(|s| !s.is_empty()),
+            allow_insecure,
+        }
     }
 
     /// True when a secret is configured, i.e. service authentication is enforced
@@ -169,6 +175,9 @@ pub async fn require_internal_auth(
 ///
 /// Returns the effective tenant (always equal to `body_tenant` on success) or a
 /// ready `403` response. Usable from both the binary and library handlers.
+// The `Err` carries a ready axum `Response` so callers can `return` it directly;
+// that type is large by design, and this is a request-path guard, not a hot loop.
+#[allow(clippy::result_large_err)]
 pub fn resolve_tenant(auth: AuthTenant, body_tenant: Uuid) -> Result<Uuid, Response> {
     match auth.0 {
         Some(org) if org == body_tenant => Ok(body_tenant),

@@ -110,7 +110,9 @@ async fn enforced_allows_matching_org_and_tenant() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     assert_eq!(String::from_utf8_lossy(&body), org.to_string());
 }
 
@@ -134,6 +136,8 @@ async fn insecure_dev_allows_without_headers() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     assert_eq!(String::from_utf8_lossy(&body), t.to_string());
 }
