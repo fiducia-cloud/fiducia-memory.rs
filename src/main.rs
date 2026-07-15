@@ -44,7 +44,10 @@ use fiducia_memory::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::postgres::PgPoolOptions;
-use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::TraceLayer};
+use tower_http::{
+    catch_panic::CatchPanicLayer, limit::RequestBodyLimitLayer, timeout::TimeoutLayer,
+    trace::TraceLayer,
+};
 use uuid::Uuid;
 
 /// Unified application state over a single shared `PgPool`.
@@ -76,12 +79,7 @@ impl FromRef<AppState> for PostgresMemory {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "fiducia_memory=info,tower_http=info".into()),
-        )
-        .init();
+    fiducia_telemetry::init("fiducia-memory");
 
     let database_url = std::env::var("DATABASE_URL")
         .map_err(|_| "DATABASE_URL must be set (the customer's Postgres or the Fiducia default)")?;
@@ -103,7 +101,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         || std::env::var("FIDUCIA_MEMORY_MIGRATE").as_deref() == Ok("true");
     if migrate_only {
         tracing::info!("schema applied");
-        println!("fiducia-memory: schema applied");
         return Ok(());
     }
 
@@ -165,6 +162,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Duration::from_secs(10),
         ))
         .layer(TraceLayer::new_for_http())
+        // Outermost: a panicking handler becomes a 500 instead of a dropped
+        // connection (fleet convention).
+        .layer(CatchPanicLayer::new())
         .with_state(state);
 
     let bind = std::env::var("FIDUCIA_MEMORY_BIND").unwrap_or_else(|_| "127.0.0.1:8100".into());

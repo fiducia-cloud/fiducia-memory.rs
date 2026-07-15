@@ -27,9 +27,10 @@ tokio = { version = "1", features = ["full"] }
 # runtime queries. TLS via rustls so a customer's managed Postgres works.
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "uuid", "json", "chrono", "migrate", "macros", "derive"] }
 # Durable service middleware (codex): body limit, timeout, tracing.
-tower-http = { version = "0.7", features = ["trace", "request-id", "timeout", "limit"] }
+tower-http = { version = "0.7", features = ["trace", "request-id", "timeout", "limit", "catch-panic"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# Shared OpenTelemetry + tracing setup (one init() for all services).
+fiducia-telemetry = { git = "https://github.com/fiducia-cloud/fiducia-telemetry.rs", tag = "v0.1.0" }
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
