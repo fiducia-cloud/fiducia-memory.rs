@@ -367,3 +367,66 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod supersession_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn assertion(t: TenantId, value: Value) -> Assertion {
+        Assertion {
+            tenant_id: t,
+            namespace: "default".into(),
+            subject: "customer:219".into(),
+            predicate: "refund_eligible".into(),
+            value,
+            confidence: 0.9,
+            author: "billing".into(),
+            evidence: vec!["ticket:88".into()],
+        }
+    }
+
+    /// Supersession is TERMINAL and atomic in effect: the moment a claim is
+    /// superseded, no path can mutate or revive it in place — support,
+    /// contest, resolve, a second supersede, and even a fresh re-assertion of
+    /// the same identity all refuse with the terminal status. There is never a
+    /// moment with two live versions of one belief, and the tombstone points
+    /// at its successor for lineage.
+    #[test]
+    fn supersede_closes_the_predecessor_against_every_mutation_path() {
+        let t = Uuid::new_v4();
+        let mut ledger = ClaimLedger::new();
+        ledger.assert(assertion(t, json!(true))).unwrap();
+
+        let successor = Uuid::new_v4();
+        let closed = ledger
+            .supersede(t, "default", "customer:219", "refund_eligible", successor)
+            .unwrap();
+        assert_eq!(closed.status, ClaimStatus::Superseded);
+        assert_eq!(
+            closed.superseded_by,
+            Some(successor),
+            "the tombstone must carry its lineage"
+        );
+
+        let terminal = |result: Result<&Claim, ClaimError>| {
+            assert!(
+                matches!(result, Err(ClaimError::Terminal(ClaimStatus::Superseded))),
+                "a superseded claim must refuse mutation"
+            );
+        };
+        terminal(ledger.support(t, "default", "customer:219", "refund_eligible", "audit"));
+        terminal(ledger.contest(t, "default", "customer:219", "refund_eligible", "qa", "stale"));
+        terminal(ledger.resolve(t, "default", "customer:219", "refund_eligible", true, "root"));
+        terminal(ledger.supersede(
+            t,
+            "default",
+            "customer:219",
+            "refund_eligible",
+            Uuid::new_v4(),
+        ));
+        // Re-asserting the same identity in place must also refuse: the ledger
+        // is append-only through NEW claims, never resurrection.
+        terminal(ledger.assert(assertion(t, json!(false))));
+    }
+}
