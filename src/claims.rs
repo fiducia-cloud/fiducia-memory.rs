@@ -341,6 +341,87 @@ mod tests {
         assert_eq!(claim.status, ClaimStatus::Asserted);
     }
 
+    /// forget() erases the identity outright: get() sees nothing, and a fresh
+    /// assertion of the same identity starts a NEW claim - claim_version back
+    /// at 1, a new id, Asserted status - never a resurrection of the removed
+    /// claim's version history or signals.
+    #[test]
+    fn forget_erases_the_claim_and_a_fresh_assert_starts_a_new_lineage() {
+        let t = tenant();
+        let mut ledger = ClaimLedger::new();
+        ledger.assert(assertion(t, json!(true), "billing")).unwrap();
+        // Bump to version 2 and accumulate a supporter so resurrection would show.
+        let old = ledger.assert(assertion(t, json!(false), "fraud")).unwrap();
+        assert_eq!(old.claim_version, 2);
+        let old_id = old.id;
+        ledger
+            .support(t, "default", "customer:219", "refund_eligible", "audit")
+            .unwrap();
+
+        let forgotten = ledger
+            .forget(t, "default", "customer:219", "refund_eligible")
+            .expect("forget returns the removed claim");
+        assert_eq!(forgotten.id, old_id);
+        assert!(
+            ledger
+                .get(t, "default", "customer:219", "refund_eligible")
+                .is_none(),
+            "a forgotten claim must be gone"
+        );
+
+        let fresh = ledger.assert(assertion(t, json!(true), "billing")).unwrap();
+        assert_eq!(
+            fresh.claim_version, 1,
+            "a post-forget assertion is a new claim, not a resurrection"
+        );
+        assert_ne!(fresh.id, old_id, "the new claim has its own identity");
+        assert_eq!(fresh.status, ClaimStatus::Asserted);
+        assert!(fresh.supporters.is_empty() && fresh.contests.is_empty());
+    }
+
+    /// consensus() yields a value ONLY after resolve(accepted=true). A
+    /// contested claim and a resolve(accepted=false) both leave consensus
+    /// empty - rejection is terminal but never authoritative truth.
+    #[test]
+    fn consensus_is_never_a_contested_or_rejected_claim() {
+        let t = tenant();
+        let mut ledger = ClaimLedger::new();
+        ledger.assert(assertion(t, json!(true), "billing")).unwrap();
+        ledger
+            .contest(
+                t,
+                "default",
+                "customer:219",
+                "refund_eligible",
+                "fraud",
+                "chargeback on file",
+            )
+            .unwrap();
+        assert_eq!(
+            ledger.consensus(t, "default", "customer:219", "refund_eligible"),
+            None,
+            "a contested claim is not consensus"
+        );
+
+        let rejected = ledger
+            .resolve(
+                t,
+                "default",
+                "customer:219",
+                "refund_eligible",
+                false,
+                "supervisor",
+            )
+            .unwrap();
+        assert_eq!(rejected.status, ClaimStatus::Rejected);
+        assert_eq!(rejected.resolved_by.as_deref(), Some("supervisor"));
+        assert_eq!(
+            ledger.consensus(t, "default", "customer:219", "refund_eligible"),
+            None,
+            "a rejected claim must never become authoritative"
+        );
+    }
+
     #[test]
     fn a_resolved_claim_is_terminal() {
         let t = tenant();
@@ -416,8 +497,22 @@ mod supersession_tests {
             );
         };
         terminal(ledger.support(t, "default", "customer:219", "refund_eligible", "audit"));
-        terminal(ledger.contest(t, "default", "customer:219", "refund_eligible", "qa", "stale"));
-        terminal(ledger.resolve(t, "default", "customer:219", "refund_eligible", true, "root"));
+        terminal(ledger.contest(
+            t,
+            "default",
+            "customer:219",
+            "refund_eligible",
+            "qa",
+            "stale",
+        ));
+        terminal(ledger.resolve(
+            t,
+            "default",
+            "customer:219",
+            "refund_eligible",
+            true,
+            "root",
+        ));
         terminal(ledger.supersede(
             t,
             "default",
