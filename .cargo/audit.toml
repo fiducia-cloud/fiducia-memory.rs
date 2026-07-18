@@ -1,0 +1,8 @@
+[advisories]
+# SQLx records its inactive MySQL macro dependencies in Cargo.lock even though
+# this service enables only the PostgreSQL backend. `cargo tree --target all
+# -i rsa` has no reachable package, so fiducia-memory cannot exercise the RSA
+# private-key operations affected by this advisory. No patched rsa release is
+# available; keep this narrow exception until SQLx stops locking the inactive
+# MySQL dependency or RustCrypto publishes a fixed release.
+ignore = ["RUSTSEC-2023-0071"]
