@@ -13,7 +13,7 @@
 //!
 //! This crate is the SEMANTIC MERGE of two independent implementations:
 //!
-//! * **The durable storage floor** ([`durable`]) — a real `PgPool` store over an
+//! * **The durable storage floor** ([`durable`]) — a SeaORM-backed store over an
 //!   append-only `memory_claims` table (generated `tsvector` search document,
 //!   HNSW cosine index, `content_sha256` active-dedup, temporal supersession).
 //!   It is the durable system of record and the candidate-GENERATION engine for
@@ -45,6 +45,8 @@ pub mod fusion;
 pub mod memory;
 pub mod postgres;
 pub mod recall;
+pub mod service;
+mod vector;
 
 pub use claims::{Assertion, ClaimError, ClaimLedger};
 pub use domain::*;

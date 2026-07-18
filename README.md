@@ -65,15 +65,17 @@ src/
   claims.rs      the contestable claim ledger (assert/support/contest/resolve/supersede)
   recall.rs      hybrid recall FUSION: lexical+semantic+trust+freshness → ranked, token-bounded pack
   memory.rs      trust scoring + the MemoryStore trait + a deterministic in-memory store
-  postgres.rs    epistemic Postgres+pgvector persistence (runtime sqlx, no compile-time DATABASE_URL)
-  db.rs          applies the canonical epistemic schema via raw_sql (idempotent)
+  postgres.rs    epistemic Postgres+pgvector persistence through SeaORM
+  db.rs          connection/TLS policy + embedded, versioned migration ledger
+  vector.rs      finite-value validation + safe pgvector text encoding
   fusion.rs      the SEAM: projects durable RecallHits → recall::Candidate for the fusion
   durable/
     model.rs     durable request/row types (durable::model::Claim = a provenance FACT row)
-    store.rs     PgPool store over memory_claims: append / atomic supersede / recall / migrate / ping
+    store.rs     SeaORM store over memory_claims: append / atomic supersede / recall / migrate / ping
     api.rs       durable axum handlers (POST /v1/claims, /supersede, /v1/recall)
-  main.rs        the unified fiducia-memory HTTP service (axum) over ONE shared PgPool
-migrations/                     (applied on boot via sqlx::migrate!)
+  service.rs     unified axum routing, state, configuration, and handlers
+  main.rs        thin bootstrap that owns the shared telemetry guard
+migrations/                     (embedded, checksummed, and applied once through SeaORM)
   0001_memory.sql               durable floor: memory_claims (tsvector, HNSW, sha256 dedup, supersession)
   0002_fiducia_memory.sql       epistemic schema: memories, embeddings, claims ledger, edges, recall log, RLS
   0003_rls_force.sql            tenant policies for every durable table + FORCE RLS owner protection
@@ -127,8 +129,9 @@ Like the rest of Fiducia, the datastore is the customer's choice. Point
 - **the Fiducia-hosted default** (turnkey, priced higher).
 
 The only requirement is the **pgvector** extension (`create extension vector`) —
-the schema does this for you. Queries use runtime `sqlx` binding, so the crate
-builds with no database reachable at compile time.
+the schema does this for you. Queries use SeaORM parameter binding, so the crate
+builds with no database reachable at compile time. Non-loopback database URLs
+must set `sslmode=verify-full`.
 
 ## Authentication & tenancy
 
@@ -164,7 +167,9 @@ rows, even when the service connects as the table owner.
 ## Running it
 
 ```bash
-# The service applies ALL migrations on boot (sqlx::migrate! over migrations/).
+# The service applies pending embedded migrations on boot through SeaORM.
+# Existing successful `_sqlx_migrations` versions are checksummed and imported
+# into `fiducia_memory_schema_migrations`, so upgrades never replay old DDL.
 # To apply the schema and exit (idempotent; needs pgvector):
 DATABASE_URL=postgres://user:pass@host/db  cargo run --locked -- --migrate
 
@@ -187,7 +192,7 @@ credentials.
 
 ### HTTP API
 
-One router, mounted over a single shared `PgPool`, exposes **both** endpoint
+One router, mounted over a single shared SeaORM connection pool, exposes **both** endpoint
 sets:
 
 | Method + path | Layer | Purpose |
@@ -280,9 +285,9 @@ Dependabot tracks Cargo, actions, and Docker inputs weekly.
 
 - **`cargo audit` is clean** — no known advisories affect the dependency tree
   (218 crates scanned). No advisories are currently accepted/waived.
-- **All SQL is parameterized.** Every query uses `sqlx` bind parameters
-  (`query`/`query_as` with `.bind(...)`); no SQL is built by string
-  concatenation or `format!`. Embeddings are passed as bound `vector` parameters.
+- **All SQL is parameterized.** Every query uses SeaORM statements with bound
+  values; no user data is built into SQL by concatenation or `format!`.
+  Embeddings are finite-validated, bound as text, and explicitly cast to `vector`.
 - **Authenticated, tenant-scoped `/v1`.** Every `/v1` route requires the
   internal-auth secret (fail-closed) and derives the tenant from the
   LB-injected `x-fiducia-org-id`, rejecting any payload `tenant_id` that
@@ -298,6 +303,9 @@ Dependabot tracks Cargo, actions, and Docker inputs weekly.
   embeddings and page sizes are range-validated before they reach the database.
 - **Secrets stay out of logs:** `DATABASE_URL` is never logged; only the
   (non-secret) bind address is emitted at startup.
+
+Shared telemetry writes structured JSON for the collector-to-Loki log path and
+exports OTLP traces plus low-cardinality metrics for collector-to-Prometheus.
 
 ## Scope & roadmap
 

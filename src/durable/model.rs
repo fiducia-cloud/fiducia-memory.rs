@@ -8,13 +8,12 @@
 //! names, rather than collapsed.
 
 use chrono::{DateTime, Utc};
-use pgvector::Vector;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub const EMBEDDING_DIMENSIONS: usize = 1536;
 
-#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Claim {
     pub claim_id: Uuid,
     pub tenant_id: Uuid,
@@ -63,9 +62,8 @@ pub struct RecallRequest {
     pub semantic_weight: f32,
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize)]
 pub struct RecallHit {
-    #[sqlx(flatten)]
     pub claim: Claim,
     pub lexical_score: f32,
     pub semantic_score: f32,
@@ -80,7 +78,7 @@ fn default_semantic_weight() -> f32 {
 }
 
 impl AppendClaim {
-    pub fn validate(&self) -> Result<Vector, &'static str> {
+    pub fn validate(&self) -> Result<String, &'static str> {
         if self.subject.trim().is_empty()
             || self.predicate.trim().is_empty()
             || self.content.trim().is_empty()
@@ -93,12 +91,12 @@ impl AppendClaim {
         if self.embedding.len() != EMBEDDING_DIMENSIONS {
             return Err("embedding must contain exactly 1536 values");
         }
-        Ok(Vector::from(self.embedding.clone()))
+        crate::vector::pgvector_literal(&self.embedding)
     }
 }
 
 impl RecallRequest {
-    pub fn validate(&self) -> Result<Vector, &'static str> {
+    pub fn validate(&self) -> Result<String, &'static str> {
         if self.query.trim().is_empty() {
             return Err("query must be non-empty");
         }
@@ -111,6 +109,6 @@ impl RecallRequest {
         if self.embedding.len() != EMBEDDING_DIMENSIONS {
             return Err("embedding must contain exactly 1536 values");
         }
-        Ok(Vector::from(self.embedding.clone()))
+        crate::vector::pgvector_literal(&self.embedding)
     }
 }

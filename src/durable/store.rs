@@ -1,21 +1,21 @@
-//! Durable `PgPool`-backed store over `memory_claims` (adopted from codex
-//! `store.rs`). Append / atomic supersede / hybrid recall / migrate / ping.
+//! Durable SeaORM-backed store over `memory_claims`.
 //!
-//! `migrate()` runs `sqlx::migrate!()` over the crate's unified `migrations/`
-//! directory, so it applies BOTH the durable `memory_claims` schema
-//! (`0001_memory.sql`) and the epistemic-layer schema — memories, embeddings,
-//! the claim ledger, edges, recall log, RLS (`0002_fiducia_memory.sql`).
+//! Append, supersede, and recall each run in a tenant-scoped transaction so
+//! PostgreSQL row-level security and the explicit tenant predicates agree.
 
 use crate::durable::model::{AppendClaim, Claim, RecallHit, RecallRequest};
-use pgvector::Vector;
+use chrono::{DateTime, Utc};
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr, QueryResult,
+    Statement, TransactionTrait,
+};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, Transaction};
 use std::fmt::Write as _;
 use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct MemoryStore {
-    pool: PgPool,
+    database: DatabaseConnection,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -25,45 +25,39 @@ pub enum StoreError {
     #[error("claim belongs to another tenant")]
     TenantMismatch,
     #[error(transparent)]
-    Database(#[from] sqlx::Error),
+    Database(#[from] DbErr),
 }
 
 impl MemoryStore {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(database: DatabaseConnection) -> Self {
+        Self { database }
     }
 
-    /// Access the underlying pool (so the unified state can share one `PgPool`).
-    pub fn pool(&self) -> &PgPool {
-        &self.pool
+    pub fn database(&self) -> &DatabaseConnection {
+        &self.database
     }
 
-    /// Apply ALL migrations in the unified `migrations/` dir (durable schema +
-    /// epistemic-layer schema).
-    pub async fn migrate(&self) -> Result<(), sqlx::migrate::MigrateError> {
-        sqlx::migrate!().run(&self.pool).await
+    /// Apply the embedded durable and epistemic schemas in migration order.
+    pub async fn migrate(&self) -> Result<(), DbErr> {
+        crate::db::apply_schema(&self.database).await
     }
 
-    pub async fn ping(&self) -> Result<(), sqlx::Error> {
-        sqlx::query("SELECT 1")
-            .execute(&self.pool)
-            .await
-            .map(|_| ())
+    pub async fn ping(&self) -> Result<(), DbErr> {
+        self.database
+            .query_one(Statement::from_string(DbBackend::Postgres, "select 1"))
+            .await?;
+        Ok(())
     }
 
     pub async fn append(
         &self,
         input: &AppendClaim,
-        embedding: Vector,
+        embedding: String,
     ) -> Result<Claim, StoreError> {
-        let mut tx = self.pool.begin().await?;
-        // Wire per-request RLS: bind `fiducia.tenant_id` on THIS transaction's
-        // connection so the (FORCEd) tenant policy on `memory_claims` admits and
-        // scopes every statement below. Without this the INSERT's RLS WITH CHECK
-        // would reject the row once RLS is forced.
-        bind_tenant(&mut tx, input.tenant_id).await?;
-        let claim = insert_claim(&mut tx, input, embedding).await?;
-        tx.commit().await?;
+        let transaction = self.database.begin().await?;
+        bind_tenant(&transaction, input.tenant_id).await?;
+        let claim = insert_claim(&transaction, input, embedding).await?;
+        transaction.commit().await?;
         Ok(claim)
     }
 
@@ -72,72 +66,122 @@ impl MemoryStore {
         old_id: Uuid,
         tenant_id: Uuid,
         input: &AppendClaim,
-        embedding: Vector,
+        embedding: String,
     ) -> Result<Claim, StoreError> {
-        let mut tx = self.pool.begin().await?;
-        // Wire per-request RLS on this transaction's connection (see `append`).
-        bind_tenant(&mut tx, tenant_id).await?;
-        let updated = sqlx::query("UPDATE memory_claims SET valid_until = COALESCE(valid_until, now()) WHERE claim_id = $1 AND tenant_id = $2 AND valid_until IS NULL")
-            .bind(old_id).bind(tenant_id).execute(&mut *tx).await?;
+        let transaction = self.database.begin().await?;
+        bind_tenant(&transaction, tenant_id).await?;
+        let updated = transaction
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "update memory_claims set valid_until = coalesce(valid_until, now()) where claim_id = $1 and tenant_id = $2 and valid_until is null",
+                [old_id.into(), tenant_id.into()],
+            ))
+            .await?;
         if updated.rows_affected() == 0 {
             return Err(StoreError::NotFound);
         }
-        let mut replacement = input.clone_for_supersede(old_id, tenant_id);
-        let claim = insert_claim(&mut tx, &replacement, embedding).await?;
-        replacement.content.clear();
-        tx.commit().await?;
+        let replacement = input.clone_for_supersede(old_id, tenant_id);
+        let claim = insert_claim(&transaction, &replacement, embedding).await?;
+        transaction.commit().await?;
         Ok(claim)
     }
 
     pub async fn recall(
         &self,
         request: &RecallRequest,
-        embedding: Vector,
+        embedding: String,
     ) -> Result<Vec<RecallHit>, StoreError> {
+        let transaction = self.database.begin().await?;
+        bind_tenant(&transaction, request.tenant_id).await?;
         let lexical_weight = 1.0 - request.semantic_weight;
-        // Read path also runs inside a tenant-scoped transaction so the FORCEd
-        // RLS policy on `memory_claims` filters candidate rows to the tenant on
-        // the same connection the query runs on. (A bare `&self.pool` read could
-        // land on a different connection than any GUC was set on, so RLS would
-        // return zero rows — the GUC MUST be bound on this very transaction.)
-        let mut tx = self.pool.begin().await?;
-        bind_tenant(&mut tx, request.tenant_id).await?;
-        let hits = sqlx::query_as::<_, RecallHit>(include_str!("../../sql/recall.sql"))
-            .bind(request.tenant_id)
-            .bind(&request.query)
-            .bind(embedding)
-            .bind(request.semantic_weight)
-            .bind(lexical_weight)
-            .bind(request.limit)
-            .fetch_all(&mut *tx)
+        let rows = transaction
+            .query_all(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                include_str!("../../sql/recall.sql"),
+                [
+                    request.tenant_id.into(),
+                    request.query.clone().into(),
+                    embedding.into(),
+                    request.semantic_weight.into(),
+                    lexical_weight.into(),
+                    request.limit.into(),
+                ],
+            ))
             .await?;
-        tx.commit().await?;
+        let hits = rows
+            .iter()
+            .map(|row| {
+                Ok(RecallHit {
+                    claim: claim_from_row(row)?,
+                    lexical_score: row.try_get("", "lexical_score")?,
+                    semantic_score: row.try_get("", "semantic_score")?,
+                    score: row.try_get("", "score")?,
+                })
+            })
+            .collect::<Result<Vec<_>, DbErr>>()?;
+        transaction.commit().await?;
         Ok(hits)
     }
 }
 
-/// Bind the per-request `fiducia.tenant_id` GUC on `tx` with `SET LOCAL`
-/// semantics (`set_config(..., true)`), so the FORCEd RLS policies on
-/// `memory_claims` filter this transaction's statements to `tenant`.
-async fn bind_tenant(tx: &mut Transaction<'_, Postgres>, tenant: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query("select set_config('fiducia.tenant_id', $1, true)")
-        .bind(tenant.to_string())
-        .execute(&mut **tx)
+/// Bind the tenant GUC with transaction-local semantics for FORCEd RLS.
+async fn bind_tenant(transaction: &DatabaseTransaction, tenant: Uuid) -> Result<(), DbErr> {
+    transaction
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "select set_config('fiducia.tenant_id', $1, true)",
+            [tenant.to_string().into()],
+        ))
         .await?;
     Ok(())
 }
 
 async fn insert_claim(
-    tx: &mut Transaction<'_, Postgres>,
+    transaction: &DatabaseTransaction,
     input: &AppendClaim,
-    embedding: Vector,
-) -> Result<Claim, sqlx::Error> {
+    embedding: String,
+) -> Result<Claim, DbErr> {
     let digest = sha256_hex(input.content.as_bytes());
-    sqlx::query_as::<_, Claim>("INSERT INTO memory_claims (tenant_id, subject, predicate, object, source, confidence, content, content_sha256, embedding, valid_from, valid_until, supersedes_claim_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10,now()),$11,$12) RETURNING claim_id,tenant_id,subject,predicate,object,source,confidence,content,content_sha256,valid_from,valid_until,supersedes_claim_id,created_at")
-        .bind(input.tenant_id).bind(input.subject.trim()).bind(input.predicate.trim())
-        .bind(&input.object).bind(&input.source).bind(input.confidence).bind(input.content.trim())
-        .bind(digest).bind(embedding).bind(input.valid_from).bind(input.valid_until)
-        .bind(input.supersedes_claim_id).fetch_one(&mut **tx).await
+    let row = transaction
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "insert into memory_claims (tenant_id, subject, predicate, object, source, confidence, content, content_sha256, embedding, valid_from, valid_until, supersedes_claim_id) values ($1,$2,$3,$4,$5,$6,$7,$8,$9::vector,coalesce($10,now()),$11,$12) returning claim_id,tenant_id,subject,predicate,object,source,confidence,content,content_sha256,valid_from,valid_until,supersedes_claim_id,created_at",
+            [
+                input.tenant_id.into(),
+                input.subject.trim().into(),
+                input.predicate.trim().into(),
+                input.object.clone().into(),
+                input.source.clone().into(),
+                input.confidence.into(),
+                input.content.trim().into(),
+                digest.into(),
+                embedding.into(),
+                input.valid_from.into(),
+                input.valid_until.into(),
+                input.supersedes_claim_id.into(),
+            ],
+        ))
+        .await?
+        .ok_or_else(|| DbErr::RecordNotFound("claim insert returned no row".into()))?;
+    claim_from_row(&row)
+}
+
+fn claim_from_row(row: &QueryResult) -> Result<Claim, DbErr> {
+    Ok(Claim {
+        claim_id: row.try_get("", "claim_id")?,
+        tenant_id: row.try_get("", "tenant_id")?,
+        subject: row.try_get("", "subject")?,
+        predicate: row.try_get("", "predicate")?,
+        object: row.try_get("", "object")?,
+        source: row.try_get("", "source")?,
+        confidence: row.try_get("", "confidence")?,
+        content: row.try_get("", "content")?,
+        content_sha256: row.try_get("", "content_sha256")?,
+        valid_from: row.try_get::<DateTime<Utc>>("", "valid_from")?,
+        valid_until: row.try_get::<Option<DateTime<Utc>>>("", "valid_until")?,
+        supersedes_claim_id: row.try_get("", "supersedes_claim_id")?,
+        created_at: row.try_get::<DateTime<Utc>>("", "created_at")?,
+    })
 }
 
 fn sha256_hex(input: &[u8]) -> String {

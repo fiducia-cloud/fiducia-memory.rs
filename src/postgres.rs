@@ -1,44 +1,26 @@
-//! PostgreSQL + pgvector persistence for the shared brain.
+//! SeaORM + pgvector persistence for the epistemic shared-brain layer.
 //!
-//! Runtime `sqlx::query(...).bind(...)` (no compile-time `DATABASE_URL`).
-//! Embeddings are passed as pgvector literals (`[a,b,c]`) cast to `vector` in
-//! SQL, so the crate needs no pgvector Rust binding to compile.
-//!
-//! Tenant isolation is enforced in **two** layers (defense in depth):
-//!
-//! 1. **Row-level security (the backstop).** Every tenant-scoped query runs
-//!    inside a transaction opened by [`PostgresMemory::with_tenant`], which
-//!    first binds the per-request `fiducia.tenant_id` GUC with
-//!    `set_config('fiducia.tenant_id', $tenant, true)` — the bindable form of
-//!    `SET LOCAL`, so the setting is scoped to *that* transaction and released
-//!    on commit/rollback. Because the GUC is set on the *same* pooled
-//!    connection that then runs the query, the RLS policies (`migrations/0002`
-//!    + `migrations/0003`, which additionally `FORCE` RLS so it applies even to
-//!      the table owner) filter every row. A pooled connection therefore never
-//!      leaks tenant state between requests.
-//! 2. **Code-level `tenant_id = $n` filters (belt-and-suspenders).** Every
-//!    query *also* filters on `tenant_id` explicitly (and, for the claims
-//!    ledger, the full `(tenant, namespace, subject, predicate)` key), so a
-//!    query is correct even if RLS were somehow disabled.
+//! Tenant-scoped operations bind `fiducia.tenant_id` inside the same database
+//! transaction that executes the query, combining FORCEd RLS with explicit
+//! tenant predicates. Embeddings are finite-validated text binds cast to
+//! PostgreSQL `vector`; no direct SQLx API is used.
 
 use crate::domain::{Claim, Memory, MemoryId, TenantId};
-use sqlx::{postgres::PgPoolOptions, PgPool, Postgres, Row, Transaction};
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr, Statement,
+    TransactionTrait,
+};
 use std::future::Future;
 use uuid::Uuid;
 
-/// A tenant-scoped transaction handed to (and returned by) the closure passed to
-/// [`PostgresMemory::with_tenant`]. It is `'static` because it is borrowed from
-/// the pool (it owns its pooled connection), which lets the closure own it —
-/// running its statements on it — without entangling caller lifetimes.
-type TenantTx = Transaction<'static, Postgres>;
+type TenantTx = DatabaseTransaction;
 
 #[derive(Clone)]
 pub struct PostgresMemory {
-    pool: PgPool,
+    database: DatabaseConnection,
 }
 
-/// A pre-scored recall candidate straight from the vector + text search, before
-/// the pure fusion/rerank pass in [`crate::recall`].
+/// A pre-scored recall candidate from vector search, before pure fusion/rerank.
 #[derive(Debug, Clone)]
 pub struct ScoredRow {
     pub memory_id: MemoryId,
@@ -47,185 +29,144 @@ pub struct ScoredRow {
 }
 
 impl PostgresMemory {
-    pub async fn connect(url: &str) -> Result<Self, sqlx::Error> {
-        Ok(Self {
-            pool: PgPoolOptions::new()
-                .max_connections(10)
-                .connect(url)
-                .await?,
-        })
+    pub async fn connect(url: &str) -> Result<Self, DbErr> {
+        let database = crate::db::connect_database(url, 20).await?;
+        Ok(Self { database })
     }
 
-    /// Wrap an already-established pool so the epistemic layer and the durable
-    /// store ([`crate::durable::store::MemoryStore`]) can share ONE `PgPool`.
-    pub fn from_pool(pool: PgPool) -> Self {
-        Self { pool }
+    /// Share an established SeaORM connection pool with the durable store.
+    pub fn from_database(database: DatabaseConnection) -> Self {
+        Self { database }
     }
 
-    /// The underlying connection pool (shared with the durable store).
-    pub fn pool(&self) -> &PgPool {
-        &self.pool
+    pub fn database(&self) -> &DatabaseConnection {
+        &self.database
     }
 
-    pub async fn ready(&self) -> Result<(), sqlx::Error> {
-        sqlx::query("select 1").execute(&self.pool).await?;
+    pub async fn ready(&self) -> Result<(), DbErr> {
+        self.database
+            .query_one(Statement::from_string(DbBackend::Postgres, "select 1"))
+            .await?;
         Ok(())
     }
 
-    pub async fn migrate(&self) -> Result<(), sqlx::Error> {
-        crate::db::apply_schema(&self.pool).await
+    pub async fn migrate(&self) -> Result<(), DbErr> {
+        crate::db::apply_schema(&self.database).await
     }
 
-    /// Run `f` inside a transaction whose `fiducia.tenant_id` GUC is bound to
-    /// `tenant`, then commit. This is the ONE place per-request RLS is wired:
-    ///
-    /// * `set_config('fiducia.tenant_id', $tenant, true)` is the bindable
-    ///   equivalent of `SET LOCAL` (`is_local = true`), so the GUC is scoped to
-    ///   this transaction and released on commit/rollback — a pooled connection
-    ///   never carries tenant state between requests.
-    /// * The GUC is set on the SAME connection the closure's statements run on
-    ///   (the transaction), so the RLS policies actually filter the query. This
-    ///   correctness point is why every tenant-scoped query MUST go through here
-    ///   rather than run on `&self.pool` directly — with a pool, a query on a
-    ///   bare pool handle could land on a different connection than the one the
-    ///   GUC was set on, and RLS would then hide every row.
-    ///
-    /// `tenant` is bound as text and cast per the policies'
-    /// `nullif(current_setting('fiducia.tenant_id', true), '')::uuid`.
-    /// The closure takes OWNERSHIP of the tenant-scoped transaction, runs its
-    /// statements on it, and returns it alongside the result so `with_tenant` can
-    /// commit. Ownership (rather than a borrowed `&mut tx`) is what keeps caller
-    /// references — e.g. a `&Memory` bound into the query — out of a higher-
-    /// ranked lifetime that would otherwise force them to be `'static`.
-    pub async fn with_tenant<T, F, Fut>(&self, tenant: TenantId, f: F) -> Result<T, sqlx::Error>
+    /// Run a closure inside a transaction with transaction-local tenant RLS.
+    pub async fn with_tenant<T, F, Fut>(&self, tenant: TenantId, f: F) -> Result<T, DbErr>
     where
         F: FnOnce(TenantTx) -> Fut,
-        Fut: Future<Output = Result<(TenantTx, T), sqlx::Error>>,
+        Fut: Future<Output = Result<(TenantTx, T), DbErr>>,
     {
-        let mut tx = self.pool.begin().await?;
-        bind_tenant(&mut tx, tenant).await?;
-        let (tx, out) = f(tx).await?;
-        tx.commit().await?;
-        Ok(out)
+        let transaction = self.database.begin().await?;
+        bind_tenant(&transaction, tenant).await?;
+        let (transaction, output) = f(transaction).await?;
+        transaction.commit().await?;
+        Ok(output)
     }
 
-    pub async fn insert_memory(&self, memory: &Memory) -> Result<(), sqlx::Error> {
+    pub async fn insert_memory(&self, memory: &Memory) -> Result<(), DbErr> {
         let memory = memory.clone();
-        self.with_tenant(memory.tenant_id, move |mut tx| {
-            Box::pin(async move {
-                sqlx::query(
+        self.with_tenant(memory.tenant_id, move |transaction| async move {
+            transaction
+                .execute(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
                     "insert into memories (id, tenant_id, namespace, memory_type, content, metadata, provenance, trust_score, importance, valid_from, valid_until) \
                      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-                )
-                .bind(memory.id)
-                .bind(memory.tenant_id)
-                .bind(&memory.namespace)
-                .bind(memory.memory_type.as_str())
-                .bind(&memory.content)
-                .bind(serde_json::to_value(&memory.metadata).expect("serializable"))
-                .bind(serde_json::to_value(&memory.provenance).expect("serializable"))
-                .bind(memory.trust_score)
-                .bind(memory.importance)
-                .bind(memory.valid_from)
-                .bind(memory.valid_until)
-                .execute(&mut *tx)
+                    [
+                        memory.id.into(),
+                        memory.tenant_id.into(),
+                        memory.namespace.into(),
+                        memory.memory_type.as_str().into(),
+                        memory.content.into(),
+                        serde_json::to_value(memory.metadata)
+                            .expect("serializable metadata")
+                            .into(),
+                        serde_json::to_value(memory.provenance)
+                            .expect("serializable provenance")
+                            .into(),
+                        memory.trust_score.into(),
+                        memory.importance.into(),
+                        memory.valid_from.into(),
+                        memory.valid_until.into(),
+                    ],
+                ))
                 .await?;
-                Ok((tx, ()))
-            })
+            Ok((transaction, ()))
         })
         .await
     }
 
-    /// Store (or replace) a memory's embedding for a given model. The embedding
-    /// is written as a pgvector literal cast in SQL.
-    ///
-    /// `tenant` is required because `memory_embeddings` carries no `tenant_id`
-    /// of its own: its RLS policy (and INSERT `WITH CHECK`) is scoped through
-    /// the parent `memories` row, so the `fiducia.tenant_id` GUC MUST be set to
-    /// the owning tenant for the write to be admitted.
     pub async fn upsert_embedding(
         &self,
         tenant: TenantId,
         memory_id: MemoryId,
         model: &str,
         embedding: &[f32],
-    ) -> Result<(), sqlx::Error> {
-        let literal = pgvector_literal(embedding);
+    ) -> Result<(), DbErr> {
+        let literal = vector_literal(embedding)?;
         let model = model.to_string();
-        self.with_tenant(tenant, move |mut tx| {
-            Box::pin(async move {
-                sqlx::query(
+        self.with_tenant(tenant, move |transaction| async move {
+            transaction
+                .execute(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
                     "insert into memory_embeddings (memory_id, model, embedding) values ($1,$2,$3::vector) \
                      on conflict (memory_id, model) do update set embedding = excluded.embedding, created_at = now()",
-                )
-                .bind(memory_id)
-                .bind(model)
-                .bind(literal)
-                .execute(&mut *tx)
+                    [memory_id.into(), model.into(), literal.into()],
+                ))
                 .await?;
-                Ok((tx, ()))
-            })
+            Ok((transaction, ()))
         })
         .await
     }
 
-    /// Nearest memories to `query_embedding` by cosine distance, scoped to the
-    /// tenant and live validity window. Returns a semantic score in [0,1]
-    /// (`1 - cosine_distance`) that the pure recall pass then fuses with lexical,
-    /// trust, and freshness signals.
     pub async fn semantic_candidates(
         &self,
         tenant: TenantId,
         query_embedding: &[f32],
         model: &str,
         limit: i64,
-    ) -> Result<Vec<ScoredRow>, sqlx::Error> {
-        let literal = pgvector_literal(query_embedding);
+    ) -> Result<Vec<ScoredRow>, DbErr> {
+        let literal = vector_literal(query_embedding)?;
         let model = model.to_string();
-        self.with_tenant(tenant, move |mut tx| {
-            Box::pin(async move {
-                let rows = sqlx::query(
+        self.with_tenant(tenant, move |transaction| async move {
+            let rows = transaction
+                .query_all(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
                     "select m.id, m.content, 1 - (e.embedding <=> $1::vector) as semantic \
                      from memories m join memory_embeddings e on e.memory_id = m.id \
                      where m.tenant_id = $2 and e.model = $3 and m.forgotten_at is null \
                        and m.superseded_by is null and (m.valid_until is null or m.valid_until > now()) \
                      order by e.embedding <=> $1::vector asc limit $4",
-                )
-                .bind(literal)
-                .bind(tenant)
-                .bind(model)
-                .bind(limit)
-                .fetch_all(&mut *tx)
+                    [literal.into(), tenant.into(), model.into(), limit.into()],
+                ))
                 .await?;
-                let rows = rows
-                    .into_iter()
-                    .map(|row| ScoredRow {
-                        memory_id: row.get::<Uuid, _>("id"),
-                        content: row.get::<String, _>("content"),
-                        semantic_score: row.get::<f64, _>("semantic") as f32,
+            let rows = rows
+                .into_iter()
+                .map(|row| {
+                    let semantic: f64 = row.try_get("", "semantic")?;
+                    Ok(ScoredRow {
+                        memory_id: row.try_get::<Uuid>("", "id")?,
+                        content: row.try_get("", "content")?,
+                        semantic_score: semantic as f32,
                     })
-                    .collect();
-                Ok((tx, rows))
-            })
+                })
+                .collect::<Result<Vec<_>, DbErr>>()?;
+            Ok((transaction, rows))
         })
         .await
     }
 
-    /// Upsert a claim by (tenant, namespace, subject, predicate) — the durable
-    /// mirror of [`crate::claims::ClaimLedger`]. The whole contest/support/resolve
-    /// lifecycle is persisted so a restart reloads authoritative state faithfully.
-    ///
-    /// `author` is a free-form agent handle in the domain model but the column is
-    /// a `uuid`; it parses when it is a UUID and is otherwise left null (the
-    /// handle is still carried in-process). Every field recall or consensus reads
-    /// — value, confidence, status, evidence, supporters, contests — round-trips.
-    pub async fn upsert_claim(&self, claim: &Claim) -> Result<(), sqlx::Error> {
+    pub async fn upsert_claim(&self, claim: &Claim) -> Result<(), DbErr> {
         let author_uuid = Uuid::parse_str(&claim.author).ok();
         let status = format!("{:?}", claim.status).to_lowercase();
         let claim = claim.clone();
-        self.with_tenant(claim.tenant_id, move |mut tx| {
-            Box::pin(async move {
-                sqlx::query(
+        self.with_tenant(claim.tenant_id, move |transaction| async move {
+            transaction
+                .execute(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
                     "insert into claims (id, tenant_id, namespace, subject, predicate, value, confidence, author_agent_id, status, evidence, supporters, contests, resolved_by, superseded_by, valid_until, claim_version) \
                      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) \
                      on conflict (tenant_id, namespace, subject, predicate) do update set \
@@ -233,100 +174,86 @@ impl PostgresMemory {
                        supporters=excluded.supporters, contests=excluded.contests, resolved_by=excluded.resolved_by, \
                        superseded_by=excluded.superseded_by, valid_until=excluded.valid_until, \
                        claim_version=excluded.claim_version, updated_at=now()",
-                )
-                .bind(claim.id)
-                .bind(claim.tenant_id)
-                .bind(&claim.namespace)
-                .bind(&claim.subject)
-                .bind(&claim.predicate)
-                .bind(&claim.value)
-                .bind(claim.confidence)
-                .bind(author_uuid)
-                .bind(status)
-                .bind(serde_json::to_value(&claim.evidence).expect("serializable"))
-                .bind(serde_json::to_value(&claim.supporters).expect("serializable"))
-                .bind(serde_json::to_value(&claim.contests).expect("serializable"))
-                .bind(&claim.resolved_by)
-                .bind(claim.superseded_by)
-                .bind(claim.valid_until)
-                .bind(claim.claim_version as i64)
-                .execute(&mut *tx)
+                    [
+                        claim.id.into(),
+                        claim.tenant_id.into(),
+                        claim.namespace.into(),
+                        claim.subject.into(),
+                        claim.predicate.into(),
+                        claim.value.into(),
+                        claim.confidence.into(),
+                        author_uuid.into(),
+                        status.into(),
+                        serde_json::to_value(claim.evidence)
+                            .expect("serializable evidence")
+                            .into(),
+                        serde_json::to_value(claim.supporters)
+                            .expect("serializable supporters")
+                            .into(),
+                        serde_json::to_value(claim.contests)
+                            .expect("serializable contests")
+                            .into(),
+                        claim.resolved_by.into(),
+                        claim.superseded_by.into(),
+                        claim.valid_until.into(),
+                        checked_i64(claim.claim_version, "claim version")?.into(),
+                    ],
+                ))
                 .await?;
-                Ok((tx, ()))
-            })
+            Ok((transaction, ()))
         })
         .await
     }
 
-    /// Fetch the accepted claim value, scoped to the ledger's full uniqueness
-    /// key `(tenant, namespace, subject, predicate)`. `namespace` must be
-    /// included: a tenant can hold the same `(subject, predicate)` in multiple
-    /// namespaces, so omitting it could return a value from the wrong namespace.
     pub async fn accepted_claim_value(
         &self,
         tenant: TenantId,
         namespace: &str,
         subject: &str,
         predicate: &str,
-    ) -> Result<Option<serde_json::Value>, sqlx::Error> {
+    ) -> Result<Option<serde_json::Value>, DbErr> {
         let namespace = namespace.to_string();
         let subject = subject.to_string();
         let predicate = predicate.to_string();
-        self.with_tenant(tenant, move |mut tx| {
-            Box::pin(async move {
-                let row = sqlx::query(
+        self.with_tenant(tenant, move |transaction| async move {
+            let value = transaction
+                .query_one(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
                     "select value from claims where tenant_id=$1 and namespace=$2 and subject=$3 and predicate=$4 and status='accepted'",
-                )
-                .bind(tenant)
-                .bind(namespace)
-                .bind(subject)
-                .bind(predicate)
-                .fetch_optional(&mut *tx)
-                .await?;
-                let value = row.map(|row| row.get::<serde_json::Value, _>("value"));
-                Ok((tx, value))
-            })
+                    [
+                        tenant.into(),
+                        namespace.into(),
+                        subject.into(),
+                        predicate.into(),
+                    ],
+                ))
+                .await?
+                .map(|row| row.try_get("", "value"))
+                .transpose()?;
+            Ok((transaction, value))
         })
         .await
     }
 }
 
-/// Bind the per-request `fiducia.tenant_id` GUC on `tx` with `SET LOCAL`
-/// semantics (`set_config(..., true)`), so RLS policies on that transaction's
-/// connection filter to `tenant`. The `true` (is_local) argument scopes the
-/// setting to the transaction; it is released on commit/rollback.
 pub(crate) async fn bind_tenant(
-    tx: &mut Transaction<'static, Postgres>,
+    transaction: &DatabaseTransaction,
     tenant: TenantId,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("select set_config('fiducia.tenant_id', $1, true)")
-        .bind(tenant.to_string())
-        .execute(&mut **tx)
+) -> Result<(), DbErr> {
+    transaction
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "select set_config('fiducia.tenant_id', $1, true)",
+            [tenant.to_string().into()],
+        ))
         .await?;
     Ok(())
 }
 
-/// Format an embedding as a pgvector text literal: `[1,2,3]`.
-fn pgvector_literal(embedding: &[f32]) -> String {
-    let mut out = String::with_capacity(embedding.len() * 8 + 2);
-    out.push('[');
-    for (i, value) in embedding.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push_str(&value.to_string());
-    }
-    out.push(']');
-    out
+fn vector_literal(embedding: &[f32]) -> Result<String, DbErr> {
+    crate::vector::pgvector_literal(embedding).map_err(|error| DbErr::Custom(error.to_string()))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::pgvector_literal;
-
-    #[test]
-    fn embeddings_format_as_pgvector_literals() {
-        assert_eq!(pgvector_literal(&[1.0, 2.5, -3.0]), "[1,2.5,-3]");
-        assert_eq!(pgvector_literal(&[]), "[]");
-    }
+fn checked_i64(value: u64, field: &str) -> Result<i64, DbErr> {
+    i64::try_from(value).map_err(|_| DbErr::Custom(format!("{field} exceeds bigint")))
 }
