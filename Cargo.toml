@@ -22,7 +22,7 @@ sha2 = "0.11"
 thiserror = "2"
 # `full` (codex) is a superset of the previously-used tokio feature set.
 tokio = { version = "1", features = ["full"] }
-sea-orm = { version = "1.1", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "with-chrono", "with-json", "with-uuid"] }
+sea-orm = { version = "2.0", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "with-chrono", "with-json", "with-uuid"] }
 # Durable service middleware (codex): body limit, timeout, tracing.
 tower-http = { version = "0.7", features = ["trace", "request-id", "timeout", "limit", "catch-panic"] }
 tracing = "0.1"
