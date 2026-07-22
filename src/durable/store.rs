@@ -44,7 +44,7 @@ impl MemoryStore {
 
     pub async fn ping(&self) -> Result<(), DbErr> {
         self.database
-            .query_one(Statement::from_string(DbBackend::Postgres, "select 1"))
+            .query_one_raw(Statement::from_string(DbBackend::Postgres, "select 1"))
             .await?;
         Ok(())
     }
@@ -71,7 +71,7 @@ impl MemoryStore {
         let transaction = self.database.begin().await?;
         bind_tenant(&transaction, tenant_id).await?;
         let updated = transaction
-            .execute(Statement::from_sql_and_values(
+            .execute_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 "update memory_claims set valid_until = coalesce(valid_until, now()) where claim_id = $1 and tenant_id = $2 and valid_until is null",
                 [old_id.into(), tenant_id.into()],
@@ -95,7 +95,7 @@ impl MemoryStore {
         bind_tenant(&transaction, request.tenant_id).await?;
         let lexical_weight = 1.0 - request.semantic_weight;
         let rows = transaction
-            .query_all(Statement::from_sql_and_values(
+            .query_all_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 include_str!("../../sql/recall.sql"),
                 [
@@ -127,7 +127,7 @@ impl MemoryStore {
 /// Bind the tenant GUC with transaction-local semantics for FORCEd RLS.
 async fn bind_tenant(transaction: &DatabaseTransaction, tenant: Uuid) -> Result<(), DbErr> {
     transaction
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "select set_config('fiducia.tenant_id', $1, true)",
             [tenant.to_string().into()],
@@ -143,7 +143,7 @@ async fn insert_claim(
 ) -> Result<Claim, DbErr> {
     let digest = sha256_hex(input.content.as_bytes());
     let row = transaction
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "insert into memory_claims (tenant_id, subject, predicate, object, source, confidence, content, content_sha256, embedding, valid_from, valid_until, supersedes_claim_id) values ($1,$2,$3,$4,$5,$6,$7,$8,$9::vector,coalesce($10,now()),$11,$12) returning claim_id,tenant_id,subject,predicate,object,source,confidence,content,content_sha256,valid_from,valid_until,supersedes_claim_id,created_at",
             [
