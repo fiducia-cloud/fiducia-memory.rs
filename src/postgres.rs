@@ -45,7 +45,7 @@ impl PostgresMemory {
 
     pub async fn ready(&self) -> Result<(), DbErr> {
         self.database
-            .query_one(Statement::from_string(DbBackend::Postgres, "select 1"))
+            .query_one_raw(Statement::from_string(DbBackend::Postgres, "select 1"))
             .await?;
         Ok(())
     }
@@ -71,7 +71,7 @@ impl PostgresMemory {
         let memory = memory.clone();
         self.with_tenant(memory.tenant_id, move |transaction| async move {
             transaction
-                .execute(Statement::from_sql_and_values(
+                .execute_raw(Statement::from_sql_and_values(
                     DbBackend::Postgres,
                     "insert into memories (id, tenant_id, namespace, memory_type, content, metadata, provenance, trust_score, importance, valid_from, valid_until) \
                      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
@@ -110,7 +110,7 @@ impl PostgresMemory {
         let model = model.to_string();
         self.with_tenant(tenant, move |transaction| async move {
             transaction
-                .execute(Statement::from_sql_and_values(
+                .execute_raw(Statement::from_sql_and_values(
                     DbBackend::Postgres,
                     "insert into memory_embeddings (memory_id, model, embedding) values ($1,$2,$3::vector) \
                      on conflict (memory_id, model) do update set embedding = excluded.embedding, created_at = now()",
@@ -133,7 +133,7 @@ impl PostgresMemory {
         let model = model.to_string();
         self.with_tenant(tenant, move |transaction| async move {
             let rows = transaction
-                .query_all(Statement::from_sql_and_values(
+                .query_all_raw(Statement::from_sql_and_values(
                     DbBackend::Postgres,
                     "select m.id, m.content, 1 - (e.embedding <=> $1::vector) as semantic \
                      from memories m join memory_embeddings e on e.memory_id = m.id \
@@ -165,7 +165,7 @@ impl PostgresMemory {
         let claim = claim.clone();
         self.with_tenant(claim.tenant_id, move |transaction| async move {
             transaction
-                .execute(Statement::from_sql_and_values(
+                .execute_raw(Statement::from_sql_and_values(
                     DbBackend::Postgres,
                     "insert into claims (id, tenant_id, namespace, subject, predicate, value, confidence, author_agent_id, status, evidence, supporters, contests, resolved_by, superseded_by, valid_until, claim_version) \
                      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) \
@@ -217,7 +217,7 @@ impl PostgresMemory {
         let predicate = predicate.to_string();
         self.with_tenant(tenant, move |transaction| async move {
             let value = transaction
-                .query_one(Statement::from_sql_and_values(
+                .query_one_raw(Statement::from_sql_and_values(
                     DbBackend::Postgres,
                     "select value from claims where tenant_id=$1 and namespace=$2 and subject=$3 and predicate=$4 and status='accepted'",
                     [
@@ -241,7 +241,7 @@ pub(crate) async fn bind_tenant(
     tenant: TenantId,
 ) -> Result<(), DbErr> {
     transaction
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "select set_config('fiducia.tenant_id', $1, true)",
             [tenant.to_string().into()],

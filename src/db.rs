@@ -58,7 +58,7 @@ pub async fn apply_schema(database: &DatabaseConnection) -> Result<(), DbErr> {
     let transaction = database.begin().await?;
 
     transaction
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "select pg_advisory_xact_lock($1)",
             [MIGRATION_LOCK_KEY.into()],
@@ -72,7 +72,7 @@ pub async fn apply_schema(database: &DatabaseConnection) -> Result<(), DbErr> {
     for migration in MIGRATIONS {
         let checksum = migration_checksum(migration.sql);
         let existing = transaction
-            .query_one(Statement::from_sql_and_values(
+            .query_one_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 "select checksum from fiducia_memory_schema_migrations where version = $1",
                 [migration.version.into()],
@@ -99,7 +99,7 @@ async fn import_legacy_sqlx_versions(
     transaction: &sea_orm::DatabaseTransaction,
 ) -> Result<(), DbErr> {
     let row = transaction
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             DbBackend::Postgres,
             "select to_regclass('_sqlx_migrations') is not null as present",
         ))
@@ -110,7 +110,7 @@ async fn import_legacy_sqlx_versions(
     }
 
     let legacy_versions = transaction
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             DbBackend::Postgres,
             LEGACY_VERSIONS_SQL,
         ))
@@ -144,7 +144,7 @@ async fn record_migration(
     source: &str,
 ) -> Result<(), DbErr> {
     transaction
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "insert into fiducia_memory_schema_migrations (version, description, checksum, source) values ($1, $2, $3, $4) on conflict (version) do nothing",
             [
