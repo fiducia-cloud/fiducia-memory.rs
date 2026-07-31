@@ -25,6 +25,8 @@ jobs:
         uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
         with:
           args: ./.github/workflows/ci.yml ./.github/workflows/cli-flags.yml
+      - name: Validate hierarchical agent instructions
+        run: python3 scripts/check-agent-instructions.py --repo . --probe src
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           toolchain: "1.95.0"
