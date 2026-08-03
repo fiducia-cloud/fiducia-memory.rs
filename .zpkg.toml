@@ -21,14 +21,6 @@ exclude = [".env", ".env.*", ".direnv/**", ".zed/**", ".zed-pack/**", "target/**
 registry = "crates-io"
 package = "fiducia-memory"
 
-[targets.repository]
-dir = "."
-name = "fiducia-memory-repository"
-
-[targets.rust]
-dir = "."
-adapter = "rust"
-
 [install]
 adapter = "rust"
 
