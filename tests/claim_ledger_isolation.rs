@@ -5,12 +5,7 @@ use uuid::Uuid;
 const SUBJECT: &str = "customer:219";
 const PREDICATE: &str = "refund_eligible";
 
-fn assertion(
-    tenant_id: Uuid,
-    namespace: &str,
-    value: Value,
-    author: &str,
-) -> Assertion {
+fn assertion(tenant_id: Uuid, namespace: &str, value: Value, author: &str) -> Assertion {
     Assertion {
         tenant_id,
         namespace: namespace.to_owned(),
@@ -23,21 +18,9 @@ fn assertion(
     }
 }
 
-fn accept(
-    ledger: &mut ClaimLedger,
-    tenant_id: Uuid,
-    namespace: &str,
-    resolver: &str,
-) {
+fn accept(ledger: &mut ClaimLedger, tenant_id: Uuid, namespace: &str, resolver: &str) {
     ledger
-        .resolve(
-            tenant_id,
-            namespace,
-            SUBJECT,
-            PREDICATE,
-            true,
-            resolver,
-        )
+        .resolve(tenant_id, namespace, SUBJECT, PREDICATE, true, resolver)
         .unwrap();
 }
 
@@ -65,12 +48,8 @@ fn identical_claim_identity_is_isolated_by_tenant() {
         Some(&json!(false))
     );
 
-    let claim_a = ledger
-        .get(tenant_a, "default", SUBJECT, PREDICATE)
-        .unwrap();
-    let claim_b = ledger
-        .get(tenant_b, "default", SUBJECT, PREDICATE)
-        .unwrap();
+    let claim_a = ledger.get(tenant_a, "default", SUBJECT, PREDICATE).unwrap();
+    let claim_b = ledger.get(tenant_b, "default", SUBJECT, PREDICATE).unwrap();
     assert_ne!(claim_a.id, claim_b.id);
     assert_eq!(claim_a.resolved_by.as_deref(), Some("supervisor-a"));
     assert_eq!(claim_b.resolved_by.as_deref(), Some("supervisor-b"));
@@ -129,12 +108,8 @@ fn mutation_of_one_namespace_never_changes_another() {
         .assert(assertion(tenant, "billing", json!(false), "billing-v2"))
         .unwrap();
 
-    let billing = ledger
-        .get(tenant, "billing", SUBJECT, PREDICATE)
-        .unwrap();
-    let fraud = ledger
-        .get(tenant, "fraud", SUBJECT, PREDICATE)
-        .unwrap();
+    let billing = ledger.get(tenant, "billing", SUBJECT, PREDICATE).unwrap();
+    let fraud = ledger.get(tenant, "fraud", SUBJECT, PREDICATE).unwrap();
 
     assert_eq!(billing.claim_version, 2);
     assert_eq!(billing.value, json!(false));
@@ -182,9 +157,7 @@ fn support_and_contest_retries_are_idempotent_per_agent() {
         )
         .unwrap();
 
-    let claim = ledger
-        .get(tenant, "default", SUBJECT, PREDICATE)
-        .unwrap();
+    let claim = ledger.get(tenant, "default", SUBJECT, PREDICATE).unwrap();
     assert_eq!(claim.supporters, vec!["audit"]);
     assert_eq!(claim.contests.len(), 1);
     assert_eq!(claim.contests[0].agent, "fraud");
