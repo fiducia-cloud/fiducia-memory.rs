@@ -198,13 +198,7 @@ fn terminal_claims_fail_closed_without_affecting_sibling_tenants() {
     );
 
     assert_eq!(
-        ledger.support(
-            terminal_tenant,
-            "default",
-            SUBJECT,
-            PREDICATE,
-            "late-agent",
-        ),
+        ledger.support(terminal_tenant, "default", SUBJECT, PREDICATE, "late-agent",),
         Err(ClaimError::Terminal(ClaimStatus::Accepted))
     );
     assert!(matches!(
