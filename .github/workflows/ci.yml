@@ -42,4 +42,15 @@ jobs:
       - uses: taiki-e/install-action@41049aa56687c35e0afa74eed4f09cec4f9afabf # v2
         with:
           tool: cargo-audit@0.22.2
-      - run: cargo audit
+      - name: Prove legacy rkyv is unreachable
+        shell: bash
+        run: |
+          set -euo pipefail
+          reverse_tree="$(cargo tree --locked -i rkyv@0.7.46)"
+          if test -n "$reverse_tree"; then
+            echo "RUSTSEC-2026-0235 exception is invalid because rkyv 0.7.46 is reachable:" >&2
+            printf '%s\n' "$reverse_tree" >&2
+            exit 1
+          fi
+      - name: Audit active dependency graph
+        run: cargo audit --ignore RUSTSEC-2026-0235
