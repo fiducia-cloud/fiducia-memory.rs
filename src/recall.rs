@@ -462,7 +462,7 @@ fn explain(contradicted: bool, lexical: f32, semantic: f32, trust: f32, freshnes
     if contradicted {
         return "down-ranked: contradicted by an accepted claim".to_string();
     }
-    let mut signals = vec![
+    let mut signals = [
         ("semantic similarity", semantic),
         ("keyword match", lexical),
         ("trust", trust),
