@@ -88,6 +88,11 @@ impl AppendClaim {
         if !(0.0..=1.0).contains(&self.confidence) {
             return Err("confidence must be between 0 and 1");
         }
+        if let (Some(valid_from), Some(valid_until)) = (&self.valid_from, &self.valid_until) {
+            if valid_until <= valid_from {
+                return Err("valid_until must be after valid_from");
+            }
+        }
         if self.embedding.len() != EMBEDDING_DIMENSIONS {
             return Err("embedding must contain exactly 1536 values");
         }
@@ -110,5 +115,124 @@ impl RecallRequest {
             return Err("embedding must contain exactly 1536 values");
         }
         crate::vector::pgvector_literal(&self.embedding)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, TimeZone};
+    use serde_json::json;
+
+    fn valid_embedding() -> Vec<f32> {
+        let mut embedding = vec![0.0; EMBEDDING_DIMENSIONS];
+        embedding[0] = 1.0;
+        embedding
+    }
+
+    fn append_claim() -> AppendClaim {
+        AppendClaim {
+            tenant_id: Uuid::nil(),
+            subject: "invoice-42".into(),
+            predicate: "payment_status".into(),
+            object: json!({"status": "paid"}),
+            source: json!({"service": "billing"}),
+            confidence: 0.9,
+            content: "Invoice 42 was paid".into(),
+            embedding: valid_embedding(),
+            valid_from: None,
+            valid_until: None,
+            supersedes_claim_id: None,
+        }
+    }
+
+    fn recall_request() -> RecallRequest {
+        RecallRequest {
+            tenant_id: Uuid::nil(),
+            query: "invoice payment status".into(),
+            embedding: valid_embedding(),
+            limit: 20,
+            semantic_weight: 0.7,
+        }
+    }
+
+    #[test]
+    fn append_accepts_a_forward_validity_window() {
+        let start = Utc
+            .with_ymd_and_hms(2026, 8, 3, 12, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        let mut input = append_claim();
+        input.valid_from = Some(start);
+        input.valid_until = Some(start + Duration::seconds(1));
+
+        assert!(input.validate().is_ok());
+    }
+
+    #[test]
+    fn append_rejects_equal_or_backward_validity_windows() {
+        let start = Utc
+            .with_ymd_and_hms(2026, 8, 3, 12, 0, 0)
+            .single()
+            .expect("valid timestamp");
+
+        for end in [start, start - Duration::seconds(1)] {
+            let mut input = append_claim();
+            input.valid_from = Some(start);
+            input.valid_until = Some(end);
+            assert_eq!(
+                input.validate(),
+                Err("valid_until must be after valid_from")
+            );
+        }
+    }
+
+    #[test]
+    fn append_and_recall_reject_zero_magnitude_embeddings() {
+        let mut append = append_claim();
+        append.embedding = vec![0.0; EMBEDDING_DIMENSIONS];
+        assert_eq!(
+            append.validate(),
+            Err("embedding must have non-zero magnitude")
+        );
+
+        let mut recall = recall_request();
+        recall.embedding = vec![-0.0; EMBEDDING_DIMENSIONS];
+        assert_eq!(
+            recall.validate(),
+            Err("embedding must have non-zero magnitude")
+        );
+    }
+
+    #[test]
+    fn append_and_recall_reject_non_finite_embeddings() {
+        let mut append = append_claim();
+        append.embedding[EMBEDDING_DIMENSIONS - 1] = f32::NAN;
+        assert_eq!(append.validate(), Err("embedding values must be finite"));
+
+        let mut recall = recall_request();
+        recall.embedding[EMBEDDING_DIMENSIONS - 1] = f32::INFINITY;
+        assert_eq!(recall.validate(), Err("embedding values must be finite"));
+    }
+
+    #[test]
+    fn dimension_and_recall_bounds_fail_closed() {
+        let mut append = append_claim();
+        append.embedding.pop();
+        assert_eq!(
+            append.validate(),
+            Err("embedding must contain exactly 1536 values")
+        );
+
+        let mut recall = recall_request();
+        recall.limit = 0;
+        assert_eq!(recall.validate(), Err("limit must be between 1 and 100"));
+
+        recall.limit = 20;
+        recall.semantic_weight = f32::NAN;
+        assert_eq!(
+            recall.validate(),
+            Err("semantic_weight must be between 0 and 1")
+        );
     }
 }
