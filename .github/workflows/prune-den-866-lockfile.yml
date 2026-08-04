@@ -1,0 +1,72 @@
+name: prune DEN-866 unreachable lock packages
+
+on:
+  push:
+    branches:
+      - agent/den-866-diversity-aware-recall
+    paths:
+      - .github/workflows/prune-den-866-lockfile.yml
+
+permissions:
+  contents: write
+
+jobs:
+  prune:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: agent/den-866-diversity-aware-recall
+          fetch-depth: 0
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: "1.95.0"
+      - name: Regenerate and prove removal-only lockfile change
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp Cargo.lock /tmp/Cargo.lock.before
+          rm Cargo.lock
+          cargo generate-lockfile
+          python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          def packages(path):
+              data = tomllib.loads(Path(path).read_text())
+              return {
+                  (pkg['name'], pkg['version'], pkg.get('source'), pkg.get('checksum'))
+                  for pkg in data.get('package', [])
+              }
+
+          before = packages('/tmp/Cargo.lock.before')
+          after = packages('Cargo.lock')
+          added = sorted(after - before)
+          removed = sorted(before - after)
+          if added:
+              raise SystemExit(f'regeneration changed or added package versions: {added}')
+          if not removed:
+              raise SystemExit('regeneration removed no unreachable packages')
+          print('removed unreachable packages:')
+          for package in removed:
+              print(package)
+          PY
+          if cargo tree --locked -i rkyv@0.7.46 | grep -q .; then
+            echo 'rkyv remains in the active feature graph' >&2
+            exit 1
+          fi
+          if grep -q '^name = "rkyv"$' Cargo.lock; then
+            echo 'rkyv remains in the regenerated lockfile' >&2
+            exit 1
+          fi
+          git diff --check -- Cargo.lock
+          git diff --stat -- Cargo.lock
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add Cargo.lock
+          git commit -m "DEN-866 prune unreachable vulnerable lock packages"
+          git push origin HEAD:agent/den-866-diversity-aware-recall
