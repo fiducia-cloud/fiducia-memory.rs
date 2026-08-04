@@ -218,9 +218,7 @@ pub fn recall_with_policy(
 
     // 3. Exact content dedupe keeps the best base-ranked representative.
     let mut seen = BTreeSet::<String>::new();
-    scored.retain(|candidate| {
-        seen.insert(candidate.retrieved.content.trim().to_lowercase())
-    });
+    scored.retain(|candidate| seen.insert(candidate.retrieved.content.trim().to_lowercase()));
 
     // 4. Greedy diversity-aware, token-bounded selection. Repetition penalties
     // are computed only from memories that actually entered the context pack.
@@ -262,10 +260,10 @@ pub fn recall_with_policy(
         candidate.retrieved.reranked_score = reranked_score;
         candidate.retrieved.diversity_penalty = penalty;
         if penalty > f32::EPSILON {
-            candidate.retrieved.reason.push_str(&format!(
-                "; provenance diversity penalty {:.3}",
-                penalty
-            ));
+            candidate
+                .retrieved
+                .reason
+                .push_str(&format!("; provenance diversity penalty {:.3}", penalty));
         }
 
         if total_tokens + candidate.retrieved.estimated_tokens > query.max_tokens {
@@ -460,13 +458,7 @@ fn unit_score(value: f32) -> f32 {
     }
 }
 
-fn explain(
-    contradicted: bool,
-    lexical: f32,
-    semantic: f32,
-    trust: f32,
-    freshness: f32,
-) -> String {
+fn explain(contradicted: bool, lexical: f32, semantic: f32, trust: f32, freshness: f32) -> String {
     if contradicted {
         return "down-ranked: contradicted by an accepted claim".to_string();
     }
@@ -604,9 +596,8 @@ mod tests {
     #[test]
     fn recall_is_bounded_by_max_tokens() {
         let tenant = Uuid::new_v4();
-        let content = |index: i64| {
-            format!("incident {index} was resolved by rolling back the deploy")
-        };
+        let content =
+            |index: i64| format!("incident {index} was resolved by rolling back the deploy");
         let budget = estimate_tokens(&content(0));
         let candidates = (0..5)
             .map(|index| candidate(memory(tenant, &content(index), 0.9, index), 0.9))
@@ -652,7 +643,9 @@ mod tests {
             "an independent source should outrank a second correlated result"
         );
         assert!(pack.memories[2].diversity_penalty > 0.0);
-        assert!(pack.memories[2].reason.contains("provenance diversity penalty"));
+        assert!(pack.memories[2]
+            .reason
+            .contains("provenance diversity penalty"));
     }
 
     #[test]
