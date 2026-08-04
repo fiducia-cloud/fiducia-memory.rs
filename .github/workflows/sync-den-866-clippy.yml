@@ -34,21 +34,10 @@ jobs:
           from pathlib import Path
           path = Path('src/recall.rs')
           source = path.read_text()
-          old = '''    let mut signals = vec![
-              ("semantic similarity", semantic),
-              ("keyword match", lexical),
-              ("trust", trust),
-              ("recency", freshness),
-          ];'''
-          new = '''    let mut signals = [
-              ("semantic similarity", semantic),
-              ("keyword match", lexical),
-              ("trust", trust),
-              ("recency", freshness),
-          ];'''
-          if source.count(old) != 1:
+          needle = 'let mut signals = vec!['
+          if source.count(needle) != 1:
               raise SystemExit('expected exactly one fixed signal Vec')
-          path.write_text(source.replace(old, new))
+          path.write_text(source.replace(needle, 'let mut signals = [', 1))
           PY
           cargo fmt --all
           git diff --check -- src/recall.rs
