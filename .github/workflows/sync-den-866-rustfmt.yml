@@ -1,0 +1,48 @@
+name: sync DEN-866 rustfmt
+
+on:
+  push:
+    branches:
+      - agent/den-866-diversity-aware-recall
+    paths:
+      - .github/workflows/sync-den-866-rustfmt.yml
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: agent/den-866-diversity-aware-recall
+          fetch-depth: 0
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: "1.95.0"
+          components: rustfmt
+      - name: Format and commit only Rust source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          git diff --check -- src/recall.rs src/lib.rs
+          if git diff --quiet -- src/recall.rs src/lib.rs; then
+            echo "Rust source already formatted"
+            exit 0
+          fi
+          if test -n "$(git status --porcelain --untracked-files=no | grep -Ev '^ M src/(recall.rs|lib.rs)$')"; then
+            echo "Refusing to commit changes outside the intended Rust files" >&2
+            git status --short >&2
+            exit 1
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/recall.rs src/lib.rs
+          git commit -m "DEN-866 apply rustfmt"
+          git push origin HEAD:agent/den-866-diversity-aware-recall
