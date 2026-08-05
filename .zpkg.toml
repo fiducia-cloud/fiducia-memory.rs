@@ -1,0 +1,29 @@
+[package]
+org = "fiducia-cloud"
+name = "fiducia-memory"
+version = "0.1.0"
+description = "Fiducia durable agent-memory library and API service"
+license = "MIT"
+keywords = ["memory", "agents", "pgvector", "postgres", "rust"]
+language = "rust"
+
+[package.repository]
+vcs = "git"
+url = "https://github.com/fiducia-cloud/fiducia-memory.rs"
+
+[publish]
+include_readme = true
+tag_format = "v{version}"
+smoke_test = "cargo test --manifest-path \"$ZED_PKG_TEST_TARGET/Cargo.toml\" --locked"
+exclude = [".env", ".env.*", ".direnv/**", ".zed/**", ".zed-pack/**", ".vendor/.zed/**", "target/**", "tmp/**", "**/*.log", ".DS_Store"]
+
+# Native crates.io publication is intentionally deferred because Cargo.toml
+# still depends on the Git-sourced fiducia-telemetry package. The Zed package
+# remains installable as source without claiming a native artifact that Cargo
+# cannot publish to crates.io yet.
+
+[install]
+adapter = "rust"
+
+[scripts]
+test = "cargo test --all-targets --locked"
