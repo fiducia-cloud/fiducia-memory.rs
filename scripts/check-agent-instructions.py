@@ -10,8 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-CANONICAL_NAME = "agents.md"
-ROOT_COMPAT_POINTER = Path("AGENTS.md")
+CANONICAL_NAME = "AGENTS.md"
 TOOL_POINTERS = (
     Path(".claude/CLAUDE.md"),
     Path(".gemini/GEMINI.md"),
@@ -32,7 +31,7 @@ class InstructionFile:
 
 
 def discover_instruction_chain(start: Path) -> list[InstructionFile]:
-    """Return readable lowercase agents.md files from filesystem root to start."""
+    """Return readable AGENTS.md files from filesystem root to start."""
 
     try:
         current = start.resolve(strict=True)
@@ -184,9 +183,8 @@ def validate_repository(repo_arg: Path, probe_arg: Path) -> list[InstructionFile
         raise ValidationError(f"canonical instructions are empty: {canonical_path}")
     canonical = canonical_path.resolve(strict=True)
 
-    validate_pointer(repo / ROOT_COMPAT_POINTER, canonical, "./agents.md")
     for relative in TOOL_POINTERS:
-        validate_pointer(repo / relative, canonical, "../agents.md")
+        validate_pointer(repo / relative, canonical, "../AGENTS.md")
 
     probe = probe_arg if probe_arg.is_absolute() else repo / probe_arg
     try:
@@ -213,7 +211,7 @@ def validate_repository(repo_arg: Path, probe_arg: Path) -> list[InstructionFile
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Validate lowercase canonical agents.md, minimal tool pointers, and "
+            "Validate canonical AGENTS.md, minimal tool pointers, and "
             "root-to-leaf hierarchical discovery."
         )
     )
@@ -242,7 +240,7 @@ def main() -> int:
         else:
             print(f"- {entry.source} -> {entry.resolved}")
     print(
-        "validated canonical agents.md, root compatibility pointer, "
+        "validated canonical AGENTS.md, "
         f"{len(TOOL_POINTERS)} tool pointers, and nested discovery fixture"
     )
     return 0
