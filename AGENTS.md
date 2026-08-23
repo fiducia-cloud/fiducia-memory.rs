@@ -58,4 +58,4 @@ Run `git diff --check` and scan recursively for unresolved conflict markers befo
 - Linear project: `github.com/fiducia-cloud`
 - Current rollout issue: `DEN-133`
 
-Before non-trivial work, search the project for an existing issue and update it instead of creating a duplicate. Link published changes to the canonical issue, keep status and blockers current, and file concrete follow-up work for any intentionally deferred scope.
+Before non-trivial work, search the project for an existing issue and update it instead of creating a duplicate. Link published changes and any pull requests to the canonical issue, keep status and blockers current, and file concrete follow-up work for any intentionally deferred scope.
